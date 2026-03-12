@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>OBS Remote</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #16161f;
+    --surface2: #1e1e2a;
+    --text: #e8e8ef;
+    --text2: #8888a0;
+    --green: #22c55e;
+    --orange: #f59e0b;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  header {
+    text-align: center;
+    padding: 20px 0 12px;
+  }
+  header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+
+  /* Connection badge */
+  .conn-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-radius: 20px;
+    background: var(--surface);
+    font-size: 13px;
+    color: var(--text2);
+    margin-top: 8px;
+  }
+  .conn-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--red);
+    transition: background 0.3s;
+  }
+  .conn-dot.on { background: var(--green); }
+
+  /* Status badges */
+  .status-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+  }
+  .status-card {
+    flex: 1;
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 14px;
+    text-align: center;
+  }
+  .status-card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text2);
+    margin-bottom: 6px;
+  }
+  .status-card .value {
+    font-size: 14px;
+    font-weight: 600;
+    transition: color 0.3s;
+  }
+  .status-card .value.active { color: var(--green); }
+  .status-card .value.warn { color: var(--orange); }
+  .status-card .value.off { color: var(--text2); }
+
+  /* Controls */
+  .controls {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 14px;
+    padding: 30px 0;
+  }
+  .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 18px;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 17px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+    transition: transform 0.1s, opacity 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+  .btn.blue { background: var(--blue); }
+  .btn.orange { background: var(--orange); color: #000; }
+  .btn.green { background: var(--green); color: #000; }
+  .btn.red { background: var(--red); }
+
+  .btn.save {
+    padding: 28px;
+    font-size: 22px;
+    border-radius: 22px;
+    background: var(--green);
+    color: #000;
+  }
+
+  .btn svg {
+    width: 22px; height: 22px;
+    fill: currentColor;
+  }
+  .btn.save svg { width: 28px; height: 28px; }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%) scale(0.8);
+    background: rgba(20,20,30,0.95);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 24px;
+    padding: 32px 44px;
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 0.25s ease-out, opacity 0.25s ease-out;
+    z-index: 10;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  .toast svg {
+    width: 56px; height: 56px;
+    fill: var(--green);
+    margin-bottom: 8px;
+  }
+  .toast p { font-size: 17px; font-weight: 600; }
+
+  /* Log */
+  .log {
+    font-size: 12px;
+    color: var(--text2);
+    text-align: center;
+    padding-bottom: 8px;
+    min-height: 18px;
+  }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>OBS Remote</h1>
+  <div class="conn-badge">
+    <span class="conn-dot" id="connDot"></span>
+    <span id="connLabel">Connecting...</span>
+  </div>
+</header>
+
+<div class="status-row">
+  <div class="status-card">
+    <div class="label">OBS</div>
+    <div class="value off" id="obsStatus">Unknown</div>
+  </div>
+  <div class="status-card">
+    <div class="label">Replay Buffer</div>
+    <div class="value off" id="rbStatus">Unknown</div>
+  </div>
+</div>
+
+<div class="controls" id="controls">
+  <!-- Buttons inserted dynamically -->
+</div>
+
+<div class="log" id="log"></div>
+
+<!-- Save confirmation toast -->
+<div class="toast" id="toast">
+  <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+  <p>Replay Saved!</p>
+</div>
+
+<!-- Icons (inline SVG templates) -->
+<template id="iconPlay"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></template>
+<template id="iconReplay"><svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg></template>
+<template id="iconSave"><svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></template>
+<template id="iconStop"><svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg></template>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const controls = $("#controls");
+
+let ws;
+let state = { obsRunning: false, obsConnected: false, replayBufferActive: false };
+let busy = false;
+let cmdId = 0;
+
+// --- WebSocket ---
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}`);
+
+  ws.onopen = () => {
+    $("#connDot").classList.add("on");
+    $("#connLabel").textContent = "Connected";
+    send("getStatus");
+  };
+
+  ws.onclose = () => {
+    $("#connDot").classList.remove("on");
+    $("#connLabel").textContent = "Disconnected";
+    setTimeout(connect, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.type === "status") {
+      state = msg;
+      render();
+    }
+
+    if (msg.type === "result") {
+      busy = false;
+      if (msg.message) showLog(msg.message);
+      render();
+    }
+
+    if (msg.type === "event" && msg.event === "replaySaved") {
+      showToast();
+    }
+  };
+}
+
+function send(command) {
+  if (!ws || ws.readyState !== 1) return;
+  const id = ++cmdId;
+  ws.send(JSON.stringify({ command, id }));
+  busy = true;
+  render();
+}
+
+// --- UI ---
+
+function icon(id) {
+  return document.getElementById(id).content.cloneNode(true);
+}
+
+function makeBtn(text, iconId, cls, cmd) {
+  const btn = document.createElement("button");
+  btn.className = `btn ${cls}`;
+  btn.disabled = busy;
+  btn.appendChild(icon(iconId));
+  btn.appendChild(document.createTextNode(text));
+  btn.addEventListener("click", () => send(cmd));
+  return btn;
+}
+
+function render() {
+  // Status badges
+  const obsEl = $("#obsStatus");
+  obsEl.textContent = state.obsRunning ? "Running" : "Not Running";
+  obsEl.className = "value " + (state.obsRunning ? "active" : "off");
+
+  const rbEl = $("#rbStatus");
+  rbEl.textContent = state.replayBufferActive ? "Active" : "Inactive";
+  rbEl.className = "value " + (state.replayBufferActive ? "warn" : "off");
+
+  // Buttons
+  controls.innerHTML = "";
+
+  if (!state.obsRunning) {
+    controls.appendChild(makeBtn("Launch OBS", "iconPlay", "blue", "launchOBS"));
+  }
+
+  if (state.obsRunning && !state.replayBufferActive) {
+    controls.appendChild(makeBtn("Start Replay Buffer", "iconReplay", "orange", "startReplayBuffer"));
+  }
+
+  if (state.obsRunning && state.replayBufferActive) {
+    controls.appendChild(makeBtn("Save Replay", "iconSave", "save", "saveReplay"));
+    controls.appendChild(makeBtn("Stop Replay Buffer", "iconStop", "red", "stopReplayBuffer"));
+  }
+}
+
+function showLog(msg) {
+  const el = $("#log");
+  el.textContent = msg;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.textContent = ""; }, 4000);
+}
+
+function showToast() {
+  const t = $("#toast");
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1500);
+}
+
+// --- Init ---
+connect();
+render();
+</script>
+</body>
+</html>

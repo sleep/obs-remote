@@ -1,0 +1,13 @@
+{
+  "name": "obs-remote-server",
+  "version": "1.0.0",
+  "description": "Control OBS from any device on your LAN via a web page",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "obs-websocket-js": "^5.0.6",
+    "ws": "^8.18.0"
+  }
+}
