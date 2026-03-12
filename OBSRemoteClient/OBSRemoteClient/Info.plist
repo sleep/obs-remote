@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>OBS Remote needs local network access to discover and connect to the OBS Remote Server running on your Mac.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_obsremote._tcp</string>
+    </array>
+</dict>
+</plist>
