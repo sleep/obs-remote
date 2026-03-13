@@ -374,12 +374,12 @@ struct ContentView: View {
     // MARK: - Device selector
 
     private var deviceSelector: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 6) {
             // Video device row
-            HStack(spacing: 4) {
+            GridRow {
                 Image(systemName: "video.fill")
-                    .frame(width: 14)
                     .foregroundStyle(.secondary)
+                    .gridColumnAlignment(.trailing)
 
                 Picker("Device", selection: $vm.selectedDevice) {
                     if vm.availableDevices.isEmpty {
@@ -397,44 +397,44 @@ struct ContentView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 250)
 
-                Button {
-                    vm.refreshDevices()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("Refresh device list")
-
-                Button {
-                    showSettings = true
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .help("Preferences")
-
-                Button {
-                    vm.openOutputFolder()
-                } label: {
-                    Image(systemName: "folder")
-                }
-                .help("Open output folder")
-
-                if vm.isCapturing {
+                HStack(spacing: 6) {
                     Button {
-                        vm.stopCapture()
+                        vm.refreshDevices()
                     } label: {
-                        Image(systemName: "stop.fill")
-                            .foregroundStyle(.red)
+                        Image(systemName: "arrow.clockwise")
                     }
-                    .help("Stop capture")
+                    .help("Refresh device list")
+
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .help("Preferences")
+
+                    Button {
+                        vm.openOutputFolder()
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .help("Open output folder")
+
+                    if vm.isCapturing {
+                        Button {
+                            vm.stopCapture()
+                        } label: {
+                            Image(systemName: "stop.fill")
+                                .foregroundStyle(.red)
+                        }
+                        .help("Stop capture")
+                    }
                 }
             }
 
             // Audio device row
-            HStack(spacing: 4) {
+            GridRow {
                 Image(systemName: "waveform")
-                    .frame(width: 14)
                     .foregroundStyle(.secondary)
 
                 Picker("Audio", selection: $vm.selectedAudioDevice) {
@@ -451,27 +451,28 @@ struct ContentView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 250)
 
-                Button {
-                    vm.refreshDevices()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("Refresh audio device list")
+                HStack(spacing: 6) {
+                    Button {
+                        vm.refreshDevices()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh audio device list")
 
-                Button {
-                    vm.audioPassthroughEnabled.toggle()
-                } label: {
-                    Image(systemName: vm.audioPassthroughEnabled
-                          ? "speaker.wave.2.fill" : "speaker.slash")
-                        .foregroundStyle(vm.audioPassthroughEnabled ? .green : .secondary)
-                }
-                .help(vm.audioPassthroughEnabled ? "Disable audio passthrough" : "Play audio through speakers")
-                .disabled(!vm.hasAudio)
+                    Button {
+                        vm.audioPassthroughEnabled.toggle()
+                    } label: {
+                        Image(systemName: vm.audioPassthroughEnabled
+                              ? "speaker.wave.2.fill" : "speaker.slash")
+                            .foregroundStyle(vm.audioPassthroughEnabled ? .green : .secondary)
+                    }
+                    .help(vm.audioPassthroughEnabled ? "Disable audio passthrough" : "Play audio through speakers")
+                    .disabled(!vm.hasAudio)
 
-                if vm.hasAudio {
-                    AudioLevelBar(level: vm.audioPeakLevel, width: 60, height: 6)
+                    if vm.hasAudio {
+                        AudioLevelBar(level: vm.audioPeakLevel, width: 60, height: 6)
+                    }
                 }
             }
         }
