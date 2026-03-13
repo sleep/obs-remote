@@ -432,9 +432,9 @@ struct ContentView: View {
             }
 
             // Audio device row
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 Image(systemName: "waveform")
-                    .frame(width: 16)
+                    .frame(width: 14)
                     .foregroundStyle(.secondary)
 
                 Picker("Audio", selection: $vm.selectedAudioDevice) {
@@ -451,7 +451,7 @@ struct ContentView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 260)
+                .frame(width: 250)
 
                 Button {
                     vm.refreshDevices()
