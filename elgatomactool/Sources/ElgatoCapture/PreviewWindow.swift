@@ -131,7 +131,6 @@ final class PreviewWindow: NSWindow {
     }
 
     func flashStatus(_ text: String) {
-        let original = statusField?.stringValue
         statusField?.stringValue = " \(text) "
         statusField?.textColor = .systemYellow
 

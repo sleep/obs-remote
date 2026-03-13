@@ -15,6 +15,7 @@ let package = Package(
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreImage"),
+                .linkedFramework("ImageIO"),
             ]
         )
     ]

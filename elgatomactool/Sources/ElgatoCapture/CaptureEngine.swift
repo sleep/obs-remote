@@ -1,9 +1,11 @@
 import AVFoundation
 import CoreMedia
 import CoreVideo
+import CoreImage
+import ImageIO
 
 /// Orchestrates the full capture pipeline: device → preview + encoder → replay buffer / recorder.
-final class CaptureEngine: NSObject {
+@objc final class CaptureEngine: NSObject {
 
     let captureSession = AVCaptureSession()
     let encoder: HardwareEncoder
@@ -43,7 +45,7 @@ final class CaptureEngine: NSObject {
         self.device = device
         print("[Capture] Using device: \(device.localizedName)")
 
-        guard let (format, fpsRange) = DeviceDiscovery.best1080p60Format(for: device) else {
+        guard let (format, _) = DeviceDiscovery.best1080p60Format(for: device) else {
             throw CaptureError.noSupportedFormat
         }
 
@@ -102,14 +104,14 @@ final class CaptureEngine: NSObject {
 
     func toggleRecording() {
         if recorder.isRecording {
-            Task {
-                let url = await recorder.stopRecording()
-                DispatchQueue.main.async { self.onStateChange?() }
+            Task { @MainActor in
+                _ = await recorder.stopRecording()
+                onStateChange?()
             }
         } else {
             do {
                 try recorder.startRecording()
-                recordingFormatDesc = nil // will be set on first keyframe
+                recordingFormatDesc = nil
                 DispatchQueue.main.async { self.onStateChange?() }
             } catch {
                 print("[Capture] Failed to start recording: \(error)")
@@ -130,14 +132,14 @@ final class CaptureEngine: NSObject {
 
         print("[Capture] Saving replay (\(String(format: "%.1f", stats.duration))s, \(frames.count) frames)...")
 
-        Task {
+        Task { @MainActor in
             let success = await Recorder.writeFrames(frames, to: url)
             if success {
                 print("[Capture] Replay saved: \(url.path)")
             } else {
                 print("[Capture] Failed to save replay")
             }
-            DispatchQueue.main.async { self.onStateChange?() }
+            onStateChange?()
         }
     }
 
@@ -153,9 +155,7 @@ final class CaptureEngine: NSObject {
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
-        let cgImage = context.createCGImage(ciImage, from: ciImage.extent)
-
-        guard let cgImage else {
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
             print("[Capture] Failed to create image from frame")
             return
         }
@@ -166,24 +166,26 @@ final class CaptureEngine: NSObject {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                      withIntermediateDirectories: true)
-            let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)!
-            CGImageDestinationAddImage(dest, cgImage, nil)
-            CGImageDestinationFinalize(dest)
-            print("[Capture] Screenshot saved: \(url.path)")
         } catch {
-            print("[Capture] Failed to save screenshot: \(error)")
+            print("[Capture] Failed to create output directory: \(error)")
+            return
         }
+
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
+            print("[Capture] Failed to create image destination")
+            return
+        }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        CGImageDestinationFinalize(dest)
+        print("[Capture] Screenshot saved: \(url.path)")
     }
 
     // MARK: - Private
 
     private func handleEncodedFrame(_ frame: EncodedFrame) {
-        // Always feed the replay buffer
         replayBuffer.append(frame)
 
-        // Feed the recorder if active
         if recorder.isRecording {
-            // Build a CMSampleBuffer from the encoded frame and pass to recorder
             if frame.isKeyframe, recordingFormatDesc == nil, let ps = frame.parameterSets {
                 recordingFormatDesc = makeFormatDescription(parameterSets: ps)
             }
@@ -230,24 +232,23 @@ final class CaptureEngine: NSObject {
         var blockBuffer: CMBlockBuffer?
         let data = frame.data
 
-        var status = data.withUnsafeBytes { raw -> OSStatus in
-            CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: nil,
-                blockLength: data.count,
-                blockAllocator: kCFAllocatorDefault,
-                customBlockSource: nil,
-                offsetToData: 0,
-                dataLength: data.count,
-                flags: 0,
-                blockBufferOut: &blockBuffer
-            )
-        }
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: data.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: data.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
         guard status == noErr, let block = blockBuffer else { return nil }
 
         status = data.withUnsafeBytes { raw -> OSStatus in
-            CMBlockBufferReplaceDataBytes(
-                with: raw.baseAddress!,
+            guard let ptr = raw.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(
+                with: ptr,
                 blockBuffer: block,
                 offsetIntoDestination: 0,
                 dataLength: data.count
@@ -288,12 +289,10 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // Store latest frame for screenshots
         latestFrameLock.lock()
         latestPixelBuffer = pixelBuffer
         latestFrameLock.unlock()
 
-        // Feed to hardware encoder
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let duration = CMSampleBufferGetDuration(sampleBuffer)
         encoder.encode(pixelBuffer, presentationTime: pts, duration: duration)
@@ -302,7 +301,6 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didDrop sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        // Frame was dropped — this shouldn't happen often with hardware encoding on M2
         print("[Capture] Frame dropped")
     }
 }

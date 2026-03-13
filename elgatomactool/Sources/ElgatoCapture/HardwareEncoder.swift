@@ -31,14 +31,7 @@ final class HardwareEncoder {
     var onEncodedFrame: ((EncodedFrame) -> Void)?
 
     private let encoderQueue = DispatchQueue(label: "encoder", qos: .userInteractive)
-    private var frameCount: Int64 = 0
 
-    /// Creates a hardware H.264 encoder.
-    /// - Parameters:
-    ///   - width: Video width (1920 for 1080p)
-    ///   - height: Video height (1080 for 1080p)
-    ///   - fps: Target frame rate (60)
-    ///   - bitrateMbps: Target bitrate in Mbps (default 20 for high quality 1080p60)
     init(width: Int32 = 1920, height: Int32 = 1080, fps: Int = 60, bitrateMbps: Int = 20) {
         self.width = width
         self.height = height
@@ -53,6 +46,15 @@ final class HardwareEncoder {
         ]
 
         var sessionOut: VTCompressionSession?
+
+        // Use the C callback API (outputHandler variant requires macOS 14.6+)
+        let callback: VTCompressionOutputCallback = { refcon, _, status, _, sampleBuffer in
+            guard status == noErr, let sampleBuffer, let refcon else { return }
+            let encoder = Unmanaged<HardwareEncoder>.fromOpaque(refcon).takeUnretainedValue()
+            encoder.handleEncodedBuffer(sampleBuffer)
+        }
+
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: width,
@@ -61,10 +63,8 @@ final class HardwareEncoder {
             encoderSpecification: encoderSpec as CFDictionary,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
-            outputHandler: { [weak self] status, flags, sampleBuffer in
-                guard status == noErr, let sampleBuffer else { return }
-                self?.handleEncodedBuffer(sampleBuffer)
-            },
+            outputCallback: callback,
+            refcon: refcon,
             compressionSessionOut: &sessionOut
         )
 
@@ -79,12 +79,11 @@ final class HardwareEncoder {
             (kVTCompressionPropertyKey_RealTime, true),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Main_AutoLevel),
             (kVTCompressionPropertyKey_AverageBitRate, bitrate),
-            // Data rate limits: [bytes per second, interval in seconds]
             (kVTCompressionPropertyKey_DataRateLimits, [bitrate / 8 * 2, 1] as [Int]),
             (kVTCompressionPropertyKey_ExpectedFrameRate, fps),
-            (kVTCompressionPropertyKey_MaxKeyFrameInterval, fps * 2),     // Keyframe every 2s
+            (kVTCompressionPropertyKey_MaxKeyFrameInterval, fps * 2),
             (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2.0),
-            (kVTCompressionPropertyKey_AllowFrameReordering, false),       // No B-frames = lower latency
+            (kVTCompressionPropertyKey_AllowFrameReordering, false),
         ]
 
         for (key, value) in properties {
@@ -99,28 +98,25 @@ final class HardwareEncoder {
     func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime, duration: CMTime) {
         guard let session else { return }
 
-        let props: [CFString: Any]? = nil
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: presentationTime,
             duration: duration,
-            frameProperties: props as CFDictionary?,
+            frameProperties: nil,
+            sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
     }
 
-    /// Force a keyframe on the next encoded frame (useful before saving replay).
+    /// Force a keyframe on the next encoded frame.
     func forceKeyframe() {
-        // Will be applied on next encode call via frame properties
-        // For simplicity, we set the session-level property
         guard let session else { return }
         VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
             value: 1 as CFTypeRef
         )
-        // Reset after one frame
         encoderQueue.asyncAfter(deadline: .now() + 0.05) { [self] in
             guard let session = self.session else { return }
             VTSessionSetProperty(
@@ -141,7 +137,7 @@ final class HardwareEncoder {
 
     // MARK: - Private
 
-    private func handleEncodedBuffer(_ sampleBuffer: CMSampleBuffer) {
+    fileprivate func handleEncodedBuffer(_ sampleBuffer: CMSampleBuffer) {
         guard let dataBuffer = sampleBuffer.dataBuffer else { return }
 
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
@@ -153,7 +149,6 @@ final class HardwareEncoder {
             isKeyframe = true
         }
 
-        // Extract the raw H.264 data
         var totalLength = 0
         var dataPointer: UnsafeMutablePointer<Int8>?
         CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: nil,
@@ -162,7 +157,6 @@ final class HardwareEncoder {
         guard let dataPointer, totalLength > 0 else { return }
         let data = Data(bytes: dataPointer, count: totalLength)
 
-        // Extract SPS/PPS from keyframes
         var parameterSets: Data?
         if isKeyframe, let formatDesc = sampleBuffer.formatDescription {
             parameterSets = extractParameterSets(from: formatDesc)
@@ -203,7 +197,6 @@ final class HardwareEncoder {
                 parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil
             )
             if status == noErr, let ptr {
-                // Write Annex-B start code + parameter set
                 let startCode: [UInt8] = [0x00, 0x00, 0x00, 0x01]
                 data.append(contentsOf: startCode)
                 data.append(ptr, count: size)
