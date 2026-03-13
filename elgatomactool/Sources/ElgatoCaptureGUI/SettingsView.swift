@@ -94,7 +94,8 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 420, height: 520)
+        .frame(width: 420)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func statusBarBinding(for field: AppSettings.StatusBarField) -> Binding<Bool> {
