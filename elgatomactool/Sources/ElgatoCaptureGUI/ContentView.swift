@@ -7,22 +7,72 @@ struct ContentView: View {
     @EnvironmentObject var settings: AppSettings
     @State private var showReplaySettings = false
     @State private var showSettings = false
+    @State private var isFullscreen = false
 
     var body: some View {
+        ZStack {
+            if isFullscreen {
+                fullscreenView
+            } else {
+                normalView
+            }
+        }
+        .frame(minWidth: isFullscreen ? nil : 640, minHeight: isFullscreen ? nil : 480)
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .environmentObject(settings)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showSettingsSheet)) { _ in
+            showSettings = true
+        }
+        .onAppear {
+            vm.refreshDevices()
+        }
+    }
+
+    // MARK: - Fullscreen
+
+    private var fullscreenView: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            videoView
+                .onTapGesture(count: 2) { toggleFullscreen() }
+
+            // Recording indicator in fullscreen
+            if vm.isRecording {
+                VStack {
+                    HStack {
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle().fill(.red).frame(width: 10, height: 10)
+                            Text("REC")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.red.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
+                        .padding(12)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .onExitCommand { toggleFullscreen() }
+    }
+
+    // MARK: - Normal view
+
+    private var normalView: some View {
         VStack(spacing: 0) {
             // Preview area
             ZStack {
-                if vm.isCapturing {
-                    // During capture: render frames directly — no AVCaptureVideoPreviewLayer,
-                    // so macOS won't throttle the session when the window is occluded.
-                    PixelBufferDisplayView(engine: vm.engine)
-                        .aspectRatio(16/9, contentMode: .fit)
-                } else if vm.isPreviewing {
-                    // Preview-only: use the lightweight preview layer (no encoder running)
-                    CapturePreviewView(session: vm.engine.captureSession)
-                        .aspectRatio(16/9, contentMode: .fit)
+                videoView
+                    .onTapGesture(count: 2) { toggleFullscreen() }
 
-                    // "Preview" badge
+                // Preview badge
+                if vm.isPreviewing && !vm.isCapturing {
                     VStack {
                         HStack {
                             HStack(spacing: 6) {
@@ -46,21 +96,6 @@ struct ContentView: View {
                         }
                         Spacer()
                     }
-                } else {
-                    Rectangle()
-                        .fill(.black)
-                        .aspectRatio(16/9, contentMode: .fit)
-                        .overlay {
-                            VStack(spacing: 12) {
-                                Image(systemName: "video.slash")
-                                    .font(.system(size: 48))
-                                    .foregroundStyle(.secondary)
-                                Text(vm.availableDevices.isEmpty
-                                     ? "No capture devices found"
-                                     : "Select a device to preview")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
                 }
 
                 // Recording indicator
@@ -87,78 +122,7 @@ struct ContentView: View {
 
                 // Stats overlay
                 if vm.isCapturing {
-                    VStack {
-                        Spacer()
-                        HStack(alignment: .bottom) {
-                            // Left: capture info + buffer
-                            HStack(spacing: 10) {
-                                if !vm.captureResolution.isEmpty {
-                                    Text(vm.captureResolution)
-                                }
-                                HStack(spacing: 4) {
-                                    Text(String(format: "%.1ffps", vm.liveFPS))
-                                        .foregroundStyle(vm.liveFPS >= 55 ? .white.opacity(0.8) :
-                                                         vm.liveFPS >= 30 ? .yellow : .red)
-                                    MiniSparkline(
-                                        data: vm.fpsHistory,
-                                        color: vm.liveFPS >= 55 ? .green : vm.liveFPS >= 30 ? .yellow : .red,
-                                        fixedMin: 0,
-                                        fixedMax: max(vm.fpsHistory.max() ?? 60, 60)
-                                    )
-                                    if vm.droppedFrames > 0 {
-                                        Text("\(vm.droppedFrames)drop")
-                                            .foregroundStyle(.red)
-                                    }
-                                }
-                                Text("BUF \(String(format: "%.0fs", vm.bufferDuration))")
-                                Text("\(vm.bufferSizeMB)MB")
-                            }
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.8))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                            .padding(8)
-
-                            Spacer()
-
-                            // Right: system stats with sparklines
-                            HStack(spacing: 10) {
-                                StatWithSparkline(
-                                    label: "CPU",
-                                    value: String(format: "%.0f%%", vm.cpuPercent),
-                                    data: vm.cpuHistory,
-                                    color: .cyan,
-                                    fixedMin: 0
-                                )
-                                StatWithSparkline(
-                                    label: "RAM",
-                                    value: formatRAM(vm.ramMB),
-                                    data: vm.ramHistory,
-                                    color: .green
-                                )
-                                StatWithSparkline(
-                                    label: "GPU",
-                                    value: String(format: "%.0f%%", vm.gpuPercent),
-                                    data: vm.gpuHistory,
-                                    color: .purple,
-                                    fixedMin: 0
-                                )
-                                StatWithSparkline(
-                                    label: "DSK",
-                                    value: String(format: "%.0fG", vm.diskFreeGB),
-                                    data: vm.diskHistory,
-                                    color: .orange
-                                )
-                            }
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.8))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                            .padding(8)
-                        }
-                    }
+                    statsOverlay
                 }
             }
             .clipped()
@@ -167,19 +131,13 @@ struct ContentView: View {
 
             // Controls
             VStack(spacing: 16) {
-                // Device selector
                 deviceSelector
 
-                // Action buttons
                 if vm.isCapturing {
                     captureControls
-
-                    if showReplaySettings {
-                        replaySettings
-                    }
+                    if showReplaySettings { replaySettings }
                 }
 
-                // Error / status
                 if let error = vm.errorMessage {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -199,17 +157,117 @@ struct ContentView: View {
             }
             .padding(16)
         }
-        .frame(minWidth: 640, minHeight: 480)
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-                .environmentObject(settings)
+    }
+
+    // MARK: - Shared video view
+
+    @ViewBuilder
+    private var videoView: some View {
+        if vm.isCapturing {
+            PixelBufferDisplayView(engine: vm.engine)
+                .aspectRatio(16/9, contentMode: .fit)
+        } else if vm.isPreviewing {
+            CapturePreviewView(session: vm.engine.captureSession)
+                .aspectRatio(16/9, contentMode: .fit)
+        } else {
+            Rectangle()
+                .fill(.black)
+                .aspectRatio(16/9, contentMode: .fit)
+                .overlay {
+                    VStack(spacing: 12) {
+                        Image(systemName: "video.slash")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text(vm.availableDevices.isEmpty
+                             ? "No capture devices found"
+                             : "Select a device to preview")
+                            .foregroundStyle(.secondary)
+                    }
+                }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .showSettingsSheet)) { _ in
-            showSettings = true
+    }
+
+    // MARK: - Stats overlay
+
+    private var statsOverlay: some View {
+        VStack {
+            Spacer()
+            HStack(alignment: .bottom) {
+                HStack(spacing: 10) {
+                    if !vm.captureResolution.isEmpty {
+                        Text(vm.captureResolution)
+                    }
+                    HStack(spacing: 4) {
+                        Text(String(format: "%.1ffps", vm.liveFPS))
+                            .foregroundStyle(vm.liveFPS >= 55 ? .white.opacity(0.8) :
+                                             vm.liveFPS >= 30 ? .yellow : .red)
+                        MiniSparkline(
+                            data: vm.fpsHistory,
+                            color: vm.liveFPS >= 55 ? .green : vm.liveFPS >= 30 ? .yellow : .red,
+                            fixedMin: 0,
+                            fixedMax: max(vm.fpsHistory.max() ?? 60, 60)
+                        )
+                        if vm.droppedFrames > 0 {
+                            Text("\(vm.droppedFrames)drop")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    Text("BUF \(String(format: "%.0fs", vm.bufferDuration))")
+                    Text("\(vm.bufferSizeMB)MB")
+                }
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.8))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                .padding(8)
+
+                Spacer()
+
+                HStack(spacing: 10) {
+                    StatWithSparkline(
+                        label: "CPU",
+                        value: String(format: "%.0f%%", vm.cpuPercent),
+                        data: vm.cpuHistory,
+                        color: .cyan,
+                        fixedMin: 0
+                    )
+                    StatWithSparkline(
+                        label: "GPU",
+                        value: String(format: "%.0f%%", vm.gpuPercent),
+                        data: vm.gpuHistory,
+                        color: .purple,
+                        fixedMin: 0
+                    )
+                    StatWithSparkline(
+                        label: "RAM",
+                        value: formatRAM(vm.ramMB),
+                        data: vm.ramHistory,
+                        color: .green
+                    )
+                    StatWithSparkline(
+                        label: "DSK",
+                        value: String(format: "%.0fG", vm.diskFreeGB),
+                        data: vm.diskHistory,
+                        color: .orange
+                    )
+                }
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.8))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                .padding(8)
+            }
         }
-        .onAppear {
-            vm.refreshDevices()
+    }
+
+    private func toggleFullscreen() {
+        guard let window = NSApp.keyWindow else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isFullscreen.toggle()
         }
+        window.toggleFullScreen(nil)
     }
 
     // MARK: - Device selector

@@ -152,11 +152,13 @@ public final class CaptureEngine: NSObject {
         let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         print("[Preview] Format: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps")
 
-        captureSession.beginConfiguration()
-        for input in captureSession.inputs { captureSession.removeInput(input) }
-        for output in captureSession.outputs { captureSession.removeOutput(output) }
-
+        // Create the input first (can throw) BEFORE touching the session config
         let input = try AVCaptureDeviceInput(device: device)
+
+        captureSession.beginConfiguration()
+        for existing in captureSession.inputs { captureSession.removeInput(existing) }
+        for existing in captureSession.outputs { captureSession.removeOutput(existing) }
+
         guard captureSession.canAddInput(input) else {
             captureSession.commitConfiguration()
             throw CaptureError.captureSessionFailed("Cannot add device input")
@@ -210,11 +212,13 @@ public final class CaptureEngine: NSObject {
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             print("[Capture] Format: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps")
 
-            captureSession.beginConfiguration()
-            for input in captureSession.inputs { captureSession.removeInput(input) }
-            for output in captureSession.outputs { captureSession.removeOutput(output) }
-
+            // Create input before touching session config — AVCaptureDeviceInput(device:) can throw
             let input = try AVCaptureDeviceInput(device: device)
+
+            captureSession.beginConfiguration()
+            for existing in captureSession.inputs { captureSession.removeInput(existing) }
+            for existing in captureSession.outputs { captureSession.removeOutput(existing) }
+
             guard captureSession.canAddInput(input) else {
                 captureSession.commitConfiguration()
                 throw CaptureError.captureSessionFailed("Cannot add device input")
@@ -515,7 +519,10 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         latestPixelBuffer = pixelBuffer
         latestFrameLock.unlock()
 
-        onFrameForDisplay?(pixelBuffer)
+        // Only display after the first keyframe to avoid green artifacts
+        if receivedFirstKeyframe {
+            onFrameForDisplay?(pixelBuffer)
+        }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let duration = CMSampleBufferGetDuration(sampleBuffer)

@@ -6,7 +6,6 @@ enum AppIconRenderer {
     static func makeIcon() -> NSImage {
         let pt: CGFloat = 512
         let px = 1024
-        let scale: CGFloat = 2
 
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
@@ -28,10 +27,8 @@ enum AppIconRenderer {
         NSGraphicsContext.current = gctx
 
         let ctx = gctx.cgContext
-        ctx.scaleBy(x: scale, y: scale)
+        // NSBitmapImageRep already maps 512pt → 1024px; no manual scale needed.
 
-        // Draw in CG's native bottom-left origin coordinate system.
-        // In this system: y=0 is bottom of image, y=pt is top.
         drawIcon(ctx: ctx, size: pt)
 
         NSGraphicsContext.restoreGraphicsState()
