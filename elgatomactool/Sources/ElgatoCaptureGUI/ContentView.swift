@@ -71,6 +71,10 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // Preview area
             ZStack {
+                // Background pattern — visible in letterbox/pillarbox bars
+                Color(white: 0.06)
+                WatermarkView()
+
                 videoView
                     .onTapGesture(count: 2) { toggleFullscreen() }
 

@@ -23,6 +23,10 @@ public final class CaptureEngine: NSObject {
     private(set) public var liveFPS: Double = 0
     private(set) public var droppedFrames: Int = 0
 
+    // Live bitrate tracking (bytes accumulated since last sample)
+    private var encodedBytesAccum: Int = 0
+    private(set) public var liveBitrateMbps: Double = 0
+
     /// Called on the 1s timer to snapshot the frame/drop counters.
     public func sampleFPS() {
         fpsLock.lock()
@@ -30,6 +34,15 @@ public final class CaptureEngine: NSObject {
         droppedFrames = dropCount
         frameCount = 0
         dropCount = 0
+        fpsLock.unlock()
+    }
+
+    /// Called on the 1s timer to snapshot and reset the bitrate accumulator.
+    /// Separate from sampleFPS so that non-timer syncState calls don't drain it.
+    public func sampleBitrate() {
+        fpsLock.lock()
+        liveBitrateMbps = Double(encodedBytesAccum) * 8.0 / 1_000_000.0
+        encodedBytesAccum = 0
         fpsLock.unlock()
     }
 
@@ -89,6 +102,11 @@ public final class CaptureEngine: NSObject {
         encoder.onEncodedFrame = { [weak self] frame in
             self?.handleEncodedFrame(frame)
         }
+    }
+
+    /// Update the encoder's target bitrate at runtime.
+    public func updateBitrate(mbps: Int) {
+        encoder.updateBitrate(mbps: mbps)
     }
 
     // MARK: - Replay buffer config
@@ -543,6 +561,10 @@ public final class CaptureEngine: NSObject {
             guard frame.isKeyframe else { return }
             receivedFirstKeyframe = true
         }
+
+        fpsLock.lock()
+        encodedBytesAccum += frame.size
+        fpsLock.unlock()
 
         replayBuffer.append(frame)
 

@@ -101,7 +101,10 @@ final class CaptureViewModel: ObservableObject {
         }
     }
     @Published var bitrateMbps: Int = 20 {
-        didSet { settings?.bitrateMbps = bitrateMbps }
+        didSet {
+            settings?.bitrateMbps = bitrateMbps
+            engine.updateBitrate(mbps: bitrateMbps)
+        }
     }
 
     private weak var settings: AppSettings?
@@ -479,7 +482,7 @@ final class CaptureViewModel: ObservableObject {
         bufferDuration = stats.duration
         bufferFrameCount = stats.frameCount
         bufferSizeMB = stats.bytes / 1_048_576
-        liveBitrateMbps = stats.duration > 0 ? Double(stats.bytes) * 8.0 / stats.duration / 1_000_000.0 : 0
+        liveBitrateMbps = engine.liveBitrateMbps
 
         engine.sampleFPS()
         liveFPS = engine.liveFPS
@@ -515,6 +518,7 @@ final class CaptureViewModel: ObservableObject {
     private func startStatusTimer() {
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                self?.engine.sampleBitrate()
                 self?.syncState()
             }
         }

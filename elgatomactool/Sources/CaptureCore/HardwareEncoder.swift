@@ -19,7 +19,7 @@ public final class HardwareEncoder {
     private var width: Int32
     private var height: Int32
     private var fps: Int
-    private let bitrateMbps: Int
+    private var bitrateMbps: Int
     private var bitrate: Int
 
     public var onEncodedFrame: ((EncodedFrame) -> Void)?
@@ -40,6 +40,16 @@ public final class HardwareEncoder {
         self.height = height
         self.fps = fps
         self.bitrate = bitrateMbps * 1_000_000
+    }
+
+    /// Update the target bitrate. If encoding is active, applies immediately to the live session.
+    public func updateBitrate(mbps: Int) {
+        bitrateMbps = mbps
+        bitrate = mbps * 1_000_000
+        guard let session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [bitrate / 8 * 2, 1] as CFTypeRef)
+        print("[Encoder] Bitrate updated to \(mbps)Mbps")
     }
 
     public func start() throws {

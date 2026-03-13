@@ -60,6 +60,20 @@ public final class ReplayBuffer {
         return Array(frames[startIndex...])
     }
 
+    /// Bytes written in the most recent `window` seconds of content.
+    public func recentBytes(window: Double = 1.0) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let last = frames.last else { return 0 }
+        let cutoff = CMTimeSubtract(last.pts, CMTimeMakeWithSeconds(window, preferredTimescale: 90000))
+        var bytes = 0
+        for i in stride(from: frames.count - 1, through: 0, by: -1) {
+            if CMTimeCompare(frames[i].pts, cutoff) < 0 { break }
+            bytes += frames[i].size
+        }
+        return bytes
+    }
+
     public var stats: (frameCount: Int, bytes: Int, duration: Double) {
         lock.lock()
         defer { lock.unlock() }
