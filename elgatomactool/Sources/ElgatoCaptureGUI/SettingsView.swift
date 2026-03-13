@@ -66,6 +66,24 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            // Overlay Stats
+            GroupBox("Overlay Stats") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Show on the video preview:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    let columns = [GridItem(.flexible()), GridItem(.flexible())]
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                        ForEach(AppSettings.OverlayStat.allCases) { stat in
+                            Toggle(stat.label, isOn: overlayStatBinding(for: stat))
+                                .toggleStyle(.checkbox)
+                        }
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // Capture
             GroupBox("Capture") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -106,6 +124,19 @@ struct SettingsView: View {
                     settings.statusBarFields.insert(field)
                 } else {
                     settings.statusBarFields.remove(field)
+                }
+            }
+        )
+    }
+
+    private func overlayStatBinding(for stat: AppSettings.OverlayStat) -> Binding<Bool> {
+        Binding(
+            get: { settings.overlayStats.contains(stat) },
+            set: { enabled in
+                if enabled {
+                    settings.overlayStats.insert(stat)
+                } else {
+                    settings.overlayStats.remove(stat)
                 }
             }
         )

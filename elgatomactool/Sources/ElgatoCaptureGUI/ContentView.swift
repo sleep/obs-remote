@@ -49,6 +49,9 @@ struct ContentView: View {
                             Text("REC")
                                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                                 .foregroundStyle(.white)
+                            Text(formatRecordingDuration(vm.recordingDuration))
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.8))
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
@@ -110,6 +113,9 @@ struct ContentView: View {
                                 Text("REC")
                                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                                     .foregroundStyle(.white)
+                                Text(formatRecordingDuration(vm.recordingDuration))
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.8))
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -123,7 +129,7 @@ struct ContentView: View {
                 // Stats overlay
                 if vm.isCapturing {
                     statsOverlay
-                } else if vm.hasAudio && vm.isPreviewing {
+                } else if vm.hasAudio && vm.isPreviewing && showStat(.audio) {
                     // Show audio graph during preview when audio device is active
                     VStack {
                         Spacer()
@@ -164,12 +170,27 @@ struct ContentView: View {
             Divider()
 
             // Controls
-            VStack(spacing: 16) {
-                deviceSelector
+            VStack(spacing: 12) {
+                HStack(alignment: .center, spacing: 16) {
+                    // Left: device selectors
+                    deviceSelector
 
-                if vm.isCapturing {
-                    captureControls
-                    if showReplaySettings { replaySettings }
+                    Spacer()
+
+                    // Right: action buttons or Start Capture
+                    if vm.isCapturing {
+                        actionButtons
+                    } else {
+                        Button("Start Capture") {
+                            vm.startCapture()
+                        }
+                        .disabled(vm.selectedDevice == nil)
+                        .tint(.green)
+                    }
+                }
+
+                if vm.isCapturing && showReplaySettings {
+                    replaySettings
                 }
 
                 if let error = vm.errorMessage {
@@ -223,12 +244,16 @@ struct ContentView: View {
 
     // MARK: - Stats overlay
 
+    private func showStat(_ stat: AppSettings.OverlayStat) -> Bool {
+        settings.overlayStats.contains(stat)
+    }
+
     private var statsOverlay: some View {
         VStack {
             Spacer()
 
             // Audio graph (above the bottom stats bar)
-            if vm.hasAudio {
+            if vm.hasAudio && showStat(.audio) {
                 HStack {
                     Spacer()
                     AudioGraphView(
@@ -244,71 +269,92 @@ struct ContentView: View {
             }
 
             HStack(alignment: .bottom) {
-                HStack(spacing: 10) {
-                    if !vm.captureResolution.isEmpty {
-                        Text(vm.captureResolution)
-                    }
-                    HStack(spacing: 4) {
-                        Text(String(format: "%.1ffps", vm.liveFPS))
-                            .foregroundStyle(vm.liveFPS >= 55 ? .white.opacity(0.8) :
-                                             vm.liveFPS >= 30 ? .yellow : .red)
-                        MiniSparkline(
-                            data: vm.fpsHistory,
-                            color: vm.liveFPS >= 55 ? .green : vm.liveFPS >= 30 ? .yellow : .red,
-                            fixedMin: 0,
-                            fixedMax: max(vm.fpsHistory.max() ?? 60, 60)
-                        )
-                        if vm.droppedFrames > 0 {
-                            Text("\(vm.droppedFrames)drop")
-                                .foregroundStyle(.red)
+                let hasLeftStats = showStat(.resolution) || showStat(.fps) || showStat(.buffer) || showStat(.bitrate)
+                if hasLeftStats {
+                    HStack(spacing: 10) {
+                        if showStat(.resolution), !vm.captureResolution.isEmpty {
+                            Text(vm.captureResolution)
+                        }
+                        if showStat(.fps) {
+                            HStack(spacing: 4) {
+                                Text(String(format: "%.1ffps", vm.liveFPS))
+                                    .foregroundStyle(vm.liveFPS >= 55 ? .white.opacity(0.8) :
+                                                     vm.liveFPS >= 30 ? .yellow : .red)
+                                MiniSparkline(
+                                    data: vm.fpsHistory,
+                                    color: vm.liveFPS >= 55 ? .green : vm.liveFPS >= 30 ? .yellow : .red,
+                                    fixedMin: 0,
+                                    fixedMax: max(vm.fpsHistory.max() ?? 60, 60)
+                                )
+                                if vm.droppedFrames > 0 {
+                                    Text("\(vm.droppedFrames)drop")
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                        }
+                        if showStat(.buffer) {
+                            Text("BUF \(String(format: "%.0fs", vm.bufferDuration))")
+                            Text("\(vm.bufferSizeMB)MB")
+                        }
+                        if showStat(.bitrate) {
+                            Text("\(vm.bitrateMbps)Mbps")
                         }
                     }
-                    Text("BUF \(String(format: "%.0fs", vm.bufferDuration))")
-                    Text("\(vm.bufferSizeMB)MB")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
                 }
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.8))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                .padding(8)
 
                 Spacer()
 
-                HStack(spacing: 10) {
-                    StatWithSparkline(
-                        label: "CPU",
-                        value: String(format: "%.0f%%", vm.cpuPercent),
-                        data: vm.cpuHistory,
-                        color: .cyan,
-                        fixedMin: 0
-                    )
-                    StatWithSparkline(
-                        label: "GPU",
-                        value: String(format: "%.0f%%", vm.gpuPercent),
-                        data: vm.gpuHistory,
-                        color: .purple,
-                        fixedMin: 0
-                    )
-                    StatWithSparkline(
-                        label: "RAM",
-                        value: formatRAM(vm.ramMB),
-                        data: vm.ramHistory,
-                        color: .green
-                    )
-                    StatWithSparkline(
-                        label: "DSK",
-                        value: String(format: "%.0fG", vm.diskFreeGB),
-                        data: vm.diskHistory,
-                        color: .orange
-                    )
+                let hasRightStats = showStat(.cpu) || showStat(.gpu) || showStat(.ram) || showStat(.disk)
+                if hasRightStats {
+                    HStack(spacing: 10) {
+                        if showStat(.cpu) {
+                            StatWithSparkline(
+                                label: "CPU",
+                                value: String(format: "%.0f%%", vm.cpuPercent),
+                                data: vm.cpuHistory,
+                                color: .cyan,
+                                fixedMin: 0
+                            )
+                        }
+                        if showStat(.gpu) {
+                            StatWithSparkline(
+                                label: "GPU",
+                                value: String(format: "%.0f%%", vm.gpuPercent),
+                                data: vm.gpuHistory,
+                                color: .purple,
+                                fixedMin: 0
+                            )
+                        }
+                        if showStat(.ram) {
+                            StatWithSparkline(
+                                label: "RAM",
+                                value: formatRAM(vm.ramMB),
+                                data: vm.ramHistory,
+                                color: .green
+                            )
+                        }
+                        if showStat(.disk) {
+                            StatWithSparkline(
+                                label: "DSK",
+                                value: String(format: "%.0fG", vm.diskFreeGB),
+                                data: vm.diskHistory,
+                                color: .orange
+                            )
+                        }
+                    }
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
                 }
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.8))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                .padding(8)
             }
         }
     }
@@ -324,7 +370,7 @@ struct ContentView: View {
     // MARK: - Device selector
 
     private var deviceSelector: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Picker("Device", selection: $vm.selectedDevice) {
                     if vm.availableDevices.isEmpty {
@@ -357,19 +403,21 @@ struct ContentView: View {
                 }
                 .help("Preferences")
 
-                Spacer()
+                Button {
+                    vm.openOutputFolder()
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .help("Open output folder")
 
                 if vm.isCapturing {
-                    Button("Stop") {
+                    Button {
                         vm.stopCapture()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .foregroundStyle(.red)
                     }
-                    .tint(.red)
-                } else {
-                    Button("Start Capture") {
-                        vm.startCapture()
-                    }
-                    .disabled(vm.selectedDevice == nil)
-                    .tint(.green)
+                    .help("Stop capture")
                 }
             }
 
@@ -382,7 +430,14 @@ struct ContentView: View {
                 Picker("Audio", selection: $vm.selectedAudioDevice) {
                     Text("None").tag(nil as AVCaptureDevice?)
                     ForEach(vm.availableAudioDevices, id: \.uniqueID) { device in
-                        Text(device.localizedName).tag(device as AVCaptureDevice?)
+                        HStack {
+                            if isElgatoDevice(device) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(.yellow)
+                            }
+                            Text(device.localizedName)
+                        }
+                        .tag(device as AVCaptureDevice?)
                     }
                 }
                 .labelsHidden()
@@ -402,90 +457,167 @@ struct ContentView: View {
                 if vm.hasAudio {
                     AudioLevelBar(level: vm.audioPeakLevel, width: 60, height: 6)
                 }
-
-                Spacer()
             }
         }
     }
 
-    // MARK: - Capture controls
+    // MARK: - Action buttons
 
-    private var captureControls: some View {
-        HStack(spacing: 12) {
-            // Record
-            ControlButton(
-                title: vm.isRecording ? "Stop Rec" : "Record",
-                icon: vm.isRecording ? "stop.circle.fill" : "record.circle",
-                color: vm.isRecording ? .red : .primary,
-                shortcut: "R"
-            ) {
-                vm.toggleRecording()
+    private var actionButtons: some View {
+        HStack(spacing: 8) {
+            recordButton
+            screenshotButton
+            replayButton
+        }
+    }
+
+    private var recordButton: some View {
+        Button {
+            vm.toggleRecording()
+        } label: {
+            VStack(spacing: 3) {
+                if vm.isRecording {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 14, height: 14)
+                        .overlay(
+                            Circle()
+                                .stroke(.red.opacity(0.4), lineWidth: 3)
+                        )
+                    Text(formatRecordingDuration(vm.recordingDuration))
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    Text("Stop")
+                        .font(.system(size: 9, weight: .medium))
+                } else {
+                    Image(systemName: "record.circle")
+                        .font(.system(size: 20))
+                    Text("Record")
+                        .font(.system(size: 11, weight: .medium))
+                    Text("R")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
             }
+            .foregroundStyle(vm.isRecording ? .red : .primary)
+            .frame(width: 72, height: 60)
+            .padding(6)
+            .background(
+                vm.isRecording
+                    ? AnyShapeStyle(.red.opacity(0.12))
+                    : AnyShapeStyle(.quaternary.opacity(0.5)),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
 
-            // Screenshot
-            ControlButton(
-                title: "Screenshot",
-                icon: "camera.fill",
-                color: .primary,
-                shortcut: "S"
-            ) {
-                vm.takeScreenshot()
+    private var screenshotButton: some View {
+        Button {
+            vm.takeScreenshot()
+        } label: {
+            VStack(spacing: 3) {
+                if vm.screenshotFeedback == .success {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.green)
+                    Text("Saved!")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.green)
+                } else {
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 20))
+                    Text("Screenshot")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                Text("S")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
+            .foregroundStyle(vm.screenshotFeedback == .success ? .green : .primary)
+            .frame(width: 72, height: 60)
+            .padding(6)
+            .background(
+                vm.screenshotFeedback == .success
+                    ? AnyShapeStyle(.green.opacity(0.12))
+                    : AnyShapeStyle(.quaternary.opacity(0.5)),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(vm.screenshotFeedback == .inProgress)
+    }
 
-            // Save Replay — compound button with config summary + settings toggle
-            HStack(spacing: 0) {
-                // Main save action
-                Button {
-                    vm.saveReplay()
-                } label: {
-                    VStack(spacing: 2) {
+    private var replayButton: some View {
+        HStack(spacing: 0) {
+            Button {
+                vm.saveReplay()
+            } label: {
+                VStack(spacing: 2) {
+                    if vm.replaySaveFeedback == .success {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.green)
+                        Text("Saved!")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.green)
+                    } else if vm.replaySaveFeedback == .failed {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.red)
+                        Text("Failed")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.red)
+                    } else if vm.replaySaveFeedback == .inProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(height: 20)
+                        Text("Saving...")
+                            .font(.system(size: 11, weight: .medium))
+                    } else {
                         Image(systemName: "arrow.counterclockwise.circle.fill")
                             .font(.system(size: 20))
                         Text("Save Replay")
                             .font(.system(size: 11, weight: .medium))
-                        Text("\(formatDuration(vm.replayDuration))  \(vm.estimatedSizeLabel(forSeconds: vm.replayDuration))")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Text("Space")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
                     }
-                    .foregroundStyle(.green)
-                    .frame(width: 100, height: 68)
-                }
-                .buttonStyle(.plain)
-
-                // Settings toggle
-                Divider()
-                    .frame(height: 40)
-                    .padding(.horizontal, 1)
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showReplaySettings.toggle()
-                    }
-                } label: {
-                    Image(systemName: showReplaySettings ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                    Text("\(formatDuration(vm.replayDuration))  \(vm.estimatedSizeLabel(forSeconds: vm.replayDuration))")
+                        .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 68)
+                    Text("Space")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help("Replay buffer settings")
+                .foregroundStyle(.green)
+                .frame(width: 90, height: 60)
             }
-            .padding(6)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+            .buttonStyle(.plain)
+            .disabled(vm.replaySaveFeedback == .inProgress)
 
-            Spacer()
+            Divider()
+                .frame(height: 36)
+                .padding(.horizontal, 1)
 
-            // Output folder
             Button {
-                vm.openOutputFolder()
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showReplaySettings.toggle()
+                }
             } label: {
-                Image(systemName: "folder")
+                Image(systemName: showReplaySettings ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 60)
             }
-            .help("Open output folder")
+            .buttonStyle(.plain)
+            .help("Replay buffer settings")
         }
+        .padding(6)
+        .background(
+            vm.replaySaveFeedback == .success
+                ? AnyShapeStyle(.green.opacity(0.12))
+                : AnyShapeStyle(.quaternary.opacity(0.5)),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
     }
 
     // MARK: - Replay settings
@@ -603,39 +735,20 @@ struct ContentView: View {
         return String(format: "%.0fM", mb)
     }
 
+    private func formatRecordingDuration(_ duration: TimeInterval) -> String {
+        let total = Int(duration)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
     private func isElgatoDevice(_ device: AVCaptureDevice) -> Bool {
         let name = device.localizedName.lowercased()
         let keywords = ["elgato", "cam link", "hd60", "4k60", "game capture"]
         return keywords.contains(where: { name.contains($0) })
-    }
-}
-
-// MARK: - Control Button
-
-struct ControlButton: View {
-    let title: String
-    let icon: String
-    let color: Color
-    let shortcut: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 20))
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                Text(shortcut)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            .foregroundStyle(color)
-            .frame(width: 80, height: 60)
-            .padding(6)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
     }
 }

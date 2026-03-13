@@ -4,6 +4,10 @@ import CoreMedia
 import CaptureCore
 import Combine
 
+enum ActionFeedback: Equatable {
+    case idle, inProgress, success, failed
+}
+
 @MainActor
 final class CaptureViewModel: ObservableObject {
 
@@ -27,6 +31,10 @@ final class CaptureViewModel: ObservableObject {
     @Published var isCapturing = false
     @Published var isRecording = false
     @Published var deviceDisconnected = false
+    @Published var recordingStartDate: Date?
+    @Published var recordingDuration: TimeInterval = 0
+    @Published var screenshotFeedback: ActionFeedback = .idle
+    @Published var replaySaveFeedback: ActionFeedback = .idle
     @Published var bufferDuration: Double = 0
     @Published var bufferFrameCount: Int = 0
     @Published var bufferSizeMB: Int = 0
@@ -43,6 +51,9 @@ final class CaptureViewModel: ObservableObject {
     @Published var selectedAudioDevice: AVCaptureDevice? {
         didSet {
             guard selectedAudioDevice?.uniqueID != oldValue?.uniqueID else { return }
+            if let settings, settings.rememberLastDevice {
+                settings.lastAudioDeviceUniqueID = selectedAudioDevice?.uniqueID
+            }
             engine.setAudioInputDevice(selectedAudioDevice)
             hasAudio = engine.hasAudioInput
             audioHistory = []
@@ -259,6 +270,13 @@ final class CaptureViewModel: ObservableObject {
     }
 
     private func autoSelectAudioDevice() -> AVCaptureDevice? {
+        // Prefer the remembered audio device
+        if let settings, settings.rememberLastDevice,
+           let savedID = settings.lastAudioDeviceUniqueID,
+           let match = availableAudioDevices.first(where: { $0.uniqueID == savedID }) {
+            return match
+        }
+
         guard let videoDevice = selectedDevice else { return nil }
         let videoName = videoDevice.localizedName.lowercased()
 
@@ -373,6 +391,8 @@ final class CaptureViewModel: ObservableObject {
         liveFPS = 0
         droppedFrames = 0
         fpsHistory = []
+        recordingStartDate = nil
+        recordingDuration = 0
         audioLevel = 0
         audioPeakLevel = 0
         audioHistory = []
@@ -402,27 +422,43 @@ final class CaptureViewModel: ObservableObject {
             self?.engine.toggleRecording()
             await MainActor.run {
                 guard let self else { return }
-                self.statusMessage = wasRecording ? "Recording stopped" : "Recording started"
+                if wasRecording {
+                    self.recordingStartDate = nil
+                    self.recordingDuration = 0
+                    self.statusMessage = "Recording stopped"
+                } else {
+                    self.recordingStartDate = Date()
+                    self.statusMessage = "Recording started"
+                }
                 self.syncState()
             }
         }
     }
 
     func takeScreenshot() {
+        screenshotFeedback = .inProgress
         statusMessage = "Saving screenshot..."
         Task.detached { [weak self] in
             self?.engine.takeScreenshot()
             await MainActor.run {
                 guard let self else { return }
+                self.screenshotFeedback = .success
                 self.statusMessage = "Screenshot saved"
+                self.clearFeedbackAfterDelay(\.screenshotFeedback)
                 self.clearStatusAfterDelay()
             }
         }
     }
 
     func saveReplay() {
-        engine.saveReplay(lastSeconds: replayDuration)
+        replaySaveFeedback = .inProgress
         statusMessage = "Saving replay..."
+        engine.saveReplay(lastSeconds: replayDuration) { [weak self] success in
+            guard let self else { return }
+            self.replaySaveFeedback = success ? .success : .failed
+            self.statusMessage = success ? "Replay saved" : "Replay save failed"
+            self.clearFeedbackAfterDelay(\.replaySaveFeedback)
+        }
     }
 
     func openOutputFolder() {
@@ -435,6 +471,9 @@ final class CaptureViewModel: ObservableObject {
 
     private func syncState() {
         isRecording = engine.recorder.isRecording
+        if let start = recordingStartDate, isRecording {
+            recordingDuration = Date().timeIntervalSince(start)
+        }
         let stats = engine.replayBuffer.stats
         bufferDuration = stats.duration
         bufferFrameCount = stats.frameCount
@@ -661,6 +700,16 @@ final class CaptureViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             if self?.statusMessage == "Screenshot saved" {
                 self?.statusMessage = ""
+            }
+        }
+    }
+
+    private func clearFeedbackAfterDelay(_ keyPath: ReferenceWritableKeyPath<CaptureViewModel, ActionFeedback>) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            let current = self[keyPath: keyPath]
+            if current == .success || current == .failed {
+                self[keyPath: keyPath] = .idle
             }
         }
     }

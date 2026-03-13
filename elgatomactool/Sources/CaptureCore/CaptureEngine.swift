@@ -467,10 +467,11 @@ public final class CaptureEngine: NSObject {
         }
     }
 
-    public func saveReplay(lastSeconds: Double? = nil) {
+    public func saveReplay(lastSeconds: Double? = nil, completion: ((Bool) -> Void)? = nil) {
         let frames = replayBuffer.getReplayFrames(lastSeconds: lastSeconds)
         guard !frames.isEmpty else {
             print("[Capture] Replay buffer is empty, nothing to save")
+            completion?(false)
             return
         }
 
@@ -489,7 +490,10 @@ public final class CaptureEngine: NSObject {
             } else {
                 print("[Capture] Failed to save replay")
             }
-            await MainActor.run { onChange?() }
+            await MainActor.run {
+                onChange?()
+                completion?(success)
+            }
         }
     }
 

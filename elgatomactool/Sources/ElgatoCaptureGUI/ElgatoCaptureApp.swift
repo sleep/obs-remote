@@ -50,6 +50,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct ElgatoCaptureApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
+    private var settings: AppSettings { appDelegate.settings }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -59,5 +61,25 @@ struct ElgatoCaptureApp: App {
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 960, height: 620)
+        .commands {
+            CommandMenu("View") {
+                ForEach(AppSettings.OverlayStat.allCases) { stat in
+                    Toggle(stat.label, isOn: overlayStatBinding(for: stat))
+                }
+            }
+        }
+    }
+
+    private func overlayStatBinding(for stat: AppSettings.OverlayStat) -> Binding<Bool> {
+        Binding(
+            get: { settings.overlayStats.contains(stat) },
+            set: { enabled in
+                if enabled {
+                    settings.overlayStats.insert(stat)
+                } else {
+                    settings.overlayStats.remove(stat)
+                }
+            }
+        )
     }
 }
