@@ -411,9 +411,14 @@ final class CaptureViewModel: ObservableObject {
         if wasOurDevice {
             reconnectDeviceID = device.uniqueID
 
-            // Don't stop the engine — keep the replay buffer and encoder state intact
-            // so the user can still save replays from the existing buffer.
-            // Just flag the disconnect so the UI shows an overlay.
+            // Stop the engine cleanly (tears down encoder + session) but the replay
+            // buffer is NOT cleared by stop(), so existing frames survive for saving.
+            // Keep isCapturing = true so the UI still shows stats/controls/buffer info.
+            if isCapturing {
+                engine.stop()
+                stopStatusTimer()
+            }
+
             deviceDisconnected = true
             statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
             errorMessage = nil
