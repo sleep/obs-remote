@@ -51,12 +51,31 @@ struct ContentView: View {
                     }
                 }
 
-                // Buffer stats overlay
+                // Stats overlay
                 if vm.isCapturing {
                     VStack {
                         Spacer()
-                        HStack {
-                            HStack(spacing: 12) {
+                        HStack(alignment: .bottom) {
+                            // Left: capture info + buffer
+                            HStack(spacing: 10) {
+                                if !vm.captureResolution.isEmpty {
+                                    Text(vm.captureResolution)
+                                }
+                                HStack(spacing: 4) {
+                                    Text(String(format: "%.1ffps", vm.liveFPS))
+                                        .foregroundStyle(vm.liveFPS >= 55 ? .white.opacity(0.8) :
+                                                         vm.liveFPS >= 30 ? .yellow : .red)
+                                    MiniSparkline(
+                                        data: vm.fpsHistory,
+                                        color: vm.liveFPS >= 55 ? .green : vm.liveFPS >= 30 ? .yellow : .red,
+                                        fixedMin: 0,
+                                        fixedMax: max(vm.fpsHistory.max() ?? 60, 60)
+                                    )
+                                    if vm.droppedFrames > 0 {
+                                        Text("\(vm.droppedFrames)drop")
+                                            .foregroundStyle(.red)
+                                    }
+                                }
                                 Text("BUF \(String(format: "%.0fs", vm.bufferDuration))")
                                 Text("\(vm.bufferSizeMB)MB")
                             }
@@ -66,7 +85,37 @@ struct ContentView: View {
                             .padding(.vertical, 5)
                             .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                             .padding(8)
+
                             Spacer()
+
+                            // Right: system stats with sparklines
+                            HStack(spacing: 10) {
+                                StatWithSparkline(
+                                    label: "CPU",
+                                    value: String(format: "%.0f%%", vm.cpuPercent),
+                                    data: vm.cpuHistory,
+                                    color: .cyan,
+                                    fixedMin: 0
+                                )
+                                StatWithSparkline(
+                                    label: "RAM",
+                                    value: formatRAM(vm.ramMB),
+                                    data: vm.ramHistory,
+                                    color: .green
+                                )
+                                StatWithSparkline(
+                                    label: "DSK",
+                                    value: String(format: "%.0fG", vm.diskFreeGB),
+                                    data: vm.diskHistory,
+                                    color: .orange
+                                )
+                            }
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                            .padding(8)
                         }
                     }
                 }
@@ -83,6 +132,7 @@ struct ContentView: View {
                 // Action buttons
                 if vm.isCapturing {
                     captureControls
+                    replaySettings
                 }
 
                 // Error / status
@@ -200,6 +250,120 @@ struct ContentView: View {
             }
             .help("Open output folder")
         }
+    }
+
+    // MARK: - Replay settings
+
+    private var replaySettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Replay Buffer")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            // Duration presets grid
+            HStack(spacing: 6) {
+                ForEach(CaptureViewModel.replayPresets, id: \.self) { seconds in
+                    let isSelected = vm.replayDuration == seconds
+                    let ramCap = vm.maxDurationForRAMCap()
+                    let exceedsRAM = ramCap != nil && seconds > ramCap!
+
+                    Button {
+                        vm.replayDuration = seconds
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text(formatDuration(seconds))
+                                .font(.system(size: 11, weight: isSelected ? .bold : .medium, design: .monospaced))
+                            Text(vm.estimatedSizeLabel(forSeconds: seconds))
+                                .font(.system(size: 9))
+                                .foregroundStyle(exceedsRAM ? .red : .secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                        .background(
+                            isSelected ? Color.accentColor.opacity(0.2) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 5)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            // Custom duration + RAM limit row
+            HStack(spacing: 16) {
+                // Custom duration
+                HStack(spacing: 6) {
+                    Text("Custom:")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    TextField("sec", text: $vm.customReplayDuration)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 50)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            if let val = Double(vm.customReplayDuration), val > 0 {
+                                vm.replayDuration = val
+                            }
+                        }
+                    if let val = Double(vm.customReplayDuration), val > 0 {
+                        Text(vm.estimatedSizeLabel(forSeconds: val))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                // RAM limit
+                HStack(spacing: 6) {
+                    Text("RAM cap:")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $vm.maxReplayRAM) {
+                        ForEach(CaptureViewModel.ramPresets, id: \.bytes) { preset in
+                            Text(preset.label).tag(preset.bytes)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 100)
+                }
+            }
+
+            // Current buffer status
+            if vm.isCapturing {
+                HStack(spacing: 12) {
+                    Text("Buffer: \(String(format: "%.0fs", vm.bufferDuration)) / \(formatDuration(vm.replayDuration))")
+                    Text("\(vm.bufferSizeMB) MB used")
+                    if let ramCap = vm.maxDurationForRAMCap() {
+                        Text("RAM cap limits to \(formatDuration(ramCap))")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func formatDuration(_ seconds: Double) -> String {
+        if seconds >= 60 {
+            let mins = Int(seconds) / 60
+            let secs = Int(seconds) % 60
+            return secs > 0 ? "\(mins)m\(secs)s" : "\(mins)m"
+        }
+        return "\(Int(seconds))s"
+    }
+
+    private func formatRAM(_ mb: Double) -> String {
+        if mb >= 1024 {
+            return String(format: "%.1fG", mb / 1024)
+        }
+        return String(format: "%.0fM", mb)
     }
 
     private func isElgatoDevice(_ device: AVCaptureDevice) -> Bool {

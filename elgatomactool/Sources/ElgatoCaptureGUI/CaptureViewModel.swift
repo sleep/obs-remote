@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import CoreMedia
 import CaptureCore
 import Combine
 
@@ -19,12 +20,71 @@ final class CaptureViewModel: ObservableObject {
     @Published var statusMessage: String = ""
     @Published var errorMessage: String?
     @Published var cameraAuthorized = false
+    @Published var captureResolution: String = ""
+    @Published var liveFPS: Double = 0
+    @Published var droppedFrames: Int = 0
+    @Published var fpsHistory: [Double] = []
+
+    // System stats
+    @Published var cpuPercent: Double = 0
+    @Published var ramMB: Double = 0
+    @Published var diskFreeGB: Double = 0
+    @Published var cpuHistory: [Double] = []
+    @Published var ramHistory: [Double] = []
+    @Published var diskHistory: [Double] = []
 
     // Settings
-    @Published var replayDuration: Double = 30
+    @Published var replayDuration: Double = 30 {
+        didSet { applyReplayLimits() }
+    }
+    @Published var customReplayDuration: String = "" // for custom entry
+    @Published var maxReplayRAM: Int = 0 { // bytes, 0 = unlimited
+        didSet { applyReplayLimits() }
+    }
     @Published var bitrateMbps: Int = 20
 
+    /// Preset durations in seconds
+    static let replayPresets: [Double] = [15, 30, 60, 90, 120, 180, 300, 600]
+
+    /// RAM cap options in bytes (0 = unlimited)
+    static let ramPresets: [(label: String, bytes: Int)] = [
+        ("Unlimited", 0),
+        ("256 MB", 256 * 1_048_576),
+        ("512 MB", 512 * 1_048_576),
+        ("1 GB", 1024 * 1_048_576),
+        ("2 GB", 2048 * 1_048_576),
+        ("4 GB", 4096 * 1_048_576),
+    ]
+
+    /// Estimated file size in MB for a given duration at the current bitrate.
+    func estimatedSizeMB(forSeconds seconds: Double) -> Double {
+        // bitrateMbps is megabits/s → divide by 8 for megabytes/s
+        return Double(bitrateMbps) * seconds / 8.0
+    }
+
+    /// Human-readable estimated size string.
+    func estimatedSizeLabel(forSeconds seconds: Double) -> String {
+        let mb = estimatedSizeMB(forSeconds: seconds)
+        if mb >= 1024 {
+            return String(format: "~%.1f GB", mb / 1024)
+        }
+        return String(format: "~%.0f MB", mb)
+    }
+
+    /// Maximum duration the chosen RAM cap allows at the current bitrate.
+    func maxDurationForRAMCap() -> Double? {
+        guard maxReplayRAM > 0 else { return nil }
+        let bytesPerSecond = Double(bitrateMbps) * 1_000_000 / 8.0
+        guard bytesPerSecond > 0 else { return nil }
+        return Double(maxReplayRAM) / bytesPerSecond
+    }
+
+    private func applyReplayLimits() {
+        engine.updateReplayLimits(duration: replayDuration, maxBytes: maxReplayRAM)
+    }
+
     let engine: CaptureEngine
+    let systemStats = SystemStatsMonitor()
     private var statusTimer: Timer?
 
     init() {
@@ -111,6 +171,11 @@ final class CaptureViewModel: ObservableObject {
             isCapturing = true
             errorMessage = nil
             statusMessage = "Capturing from \(device.localizedName)"
+
+            // Read resolution from the device's active format
+            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            captureResolution = "\(dims.width)x\(dims.height)"
+
             startStatusTimer()
         } catch {
             errorMessage = error.localizedDescription
@@ -125,17 +190,22 @@ final class CaptureViewModel: ObservableObject {
         isCapturing = false
         stopStatusTimer()
         statusMessage = "Stopped"
+        captureResolution = ""
+        liveFPS = 0
+        droppedFrames = 0
+        fpsHistory = []
         syncState()
     }
 
     // MARK: - Actions
 
     func toggleRecording() {
+        let wasRecording = engine.recorder.isRecording
         engine.toggleRecording()
-        if !engine.recorder.isRecording {
-            statusMessage = "Recording started"
-        } else {
+        if wasRecording {
             statusMessage = "Recording stopped"
+        } else {
+            statusMessage = "Recording started"
         }
     }
 
@@ -164,6 +234,20 @@ final class CaptureViewModel: ObservableObject {
         bufferDuration = stats.duration
         bufferFrameCount = stats.frameCount
         bufferSizeMB = stats.bytes / 1_048_576
+
+        engine.sampleFPS()
+        liveFPS = engine.liveFPS
+        droppedFrames = engine.droppedFrames
+        fpsHistory.append(liveFPS)
+        if fpsHistory.count > 60 { fpsHistory.removeFirst(fpsHistory.count - 60) }
+
+        systemStats.sample()
+        cpuPercent = systemStats.latestCPU
+        ramMB = systemStats.latestRAM
+        diskFreeGB = systemStats.latestDisk
+        cpuHistory = systemStats.cpuHistory
+        ramHistory = systemStats.ramHistory
+        diskHistory = systemStats.diskHistory
     }
 
     private func startStatusTimer() {

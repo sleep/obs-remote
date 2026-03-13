@@ -5,12 +5,23 @@ public final class ReplayBuffer {
 
     private var frames: [EncodedFrame] = []
     private let lock = NSLock()
-    private let maxDuration: Double
+    private(set) public var maxDuration: Double
+    private(set) public var maxBytes: Int  // 0 = unlimited
     private var totalBytes: Int = 0
 
-    public init(duration: Double = 30.0) {
+    public init(duration: Double = 30.0, maxBytes: Int = 0) {
         self.maxDuration = duration
+        self.maxBytes = maxBytes
         frames.reserveCapacity(Int(60 * duration))
+    }
+
+    /// Update buffer limits at runtime. Trims immediately if the new limits are tighter.
+    public func updateLimits(duration: Double? = nil, maxBytes: Int? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let d = duration { self.maxDuration = d }
+        if let b = maxBytes { self.maxBytes = b }
+        trimLocked()
     }
 
     public func append(_ frame: EncodedFrame) {
@@ -63,6 +74,7 @@ public final class ReplayBuffer {
         let latestPTS = frames.last!.pts
         let cutoff = CMTimeSubtract(latestPTS, CMTimeMakeWithSeconds(maxDuration + 2.0, preferredTimescale: 90000))
 
+        // Find how many frames exceed the duration limit
         var removeCount = 0
         for i in 0..<frames.count - 1 {
             if CMTimeCompare(frames[i].pts, cutoff) < 0 {
@@ -72,8 +84,18 @@ public final class ReplayBuffer {
             }
         }
 
+        // Also enforce RAM limit: keep removing GOPs from the front if over budget
+        if maxBytes > 0 && totalBytes > maxBytes && removeCount < frames.count - 1 {
+            for i in removeCount..<frames.count - 1 {
+                // Estimate remaining bytes after removing up to i+1
+                var remaining = totalBytes
+                for j in 0...i { remaining -= frames[j].size }
+                if remaining <= maxBytes { removeCount = i + 1; break }
+            }
+        }
+
         if removeCount > 0 {
-            while removeCount > 0 && !frames[removeCount].isKeyframe {
+            while removeCount > 0 && removeCount < frames.count && !frames[removeCount].isKeyframe {
                 removeCount -= 1
             }
             if removeCount > 0 {
