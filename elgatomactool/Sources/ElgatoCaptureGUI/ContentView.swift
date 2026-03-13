@@ -10,9 +10,36 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // Preview area
             ZStack {
-                if vm.isCapturing {
+                if vm.isPreviewing || vm.isCapturing {
                     CapturePreviewView(session: vm.engine.captureSession)
                         .aspectRatio(16/9, contentMode: .fit)
+
+                    // "Preview" badge when previewing but not capturing
+                    if vm.isPreviewing && !vm.isCapturing {
+                        VStack {
+                            HStack {
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(.blue)
+                                        .frame(width: 8, height: 8)
+                                    Text("PREVIEW")
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(.white)
+                                    if !vm.captureResolution.isEmpty {
+                                        Text(vm.captureResolution)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.7))
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.blue.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+                                .padding(8)
+                                Spacer()
+                            }
+                            Spacer()
+                        }
+                    }
                 } else {
                     Rectangle()
                         .fill(.black)
@@ -24,7 +51,7 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                 Text(vm.availableDevices.isEmpty
                                      ? "No capture devices found"
-                                     : "Select a device and press Start")
+                                     : "Select a device to preview")
                                     .foregroundStyle(.secondary)
                             }
                         }

@@ -9,9 +9,15 @@ final class CaptureViewModel: ObservableObject {
 
     // Device selection
     @Published var availableDevices: [AVCaptureDevice] = []
-    @Published var selectedDevice: AVCaptureDevice?
+    @Published var selectedDevice: AVCaptureDevice? {
+        didSet {
+            guard selectedDevice?.uniqueID != oldValue?.uniqueID else { return }
+            startPreviewForSelectedDevice()
+        }
+    }
 
     // State
+    @Published var isPreviewing = false
     @Published var isCapturing = false
     @Published var isRecording = false
     @Published var bufferDuration: Double = 0
@@ -137,6 +143,11 @@ final class CaptureViewModel: ObservableObject {
         if availableDevices.isEmpty {
             statusMessage = "No capture devices found. Plug in your Elgato and refresh."
         }
+
+        // Start preview if we have a device and aren't already capturing
+        if selectedDevice != nil && !isCapturing && !isPreviewing {
+            startPreviewForSelectedDevice()
+        }
     }
 
     private func autoSelectDevice() -> AVCaptureDevice? {
@@ -148,6 +159,30 @@ final class CaptureViewModel: ObservableObject {
             return match
         }
         return availableDevices.first
+    }
+
+    // MARK: - Preview
+
+    func startPreviewForSelectedDevice() {
+        guard cameraAuthorized, let device = selectedDevice else { return }
+        // Don't interrupt a running capture
+        guard !isCapturing else { return }
+
+        do {
+            try engine.startPreview(with: device)
+            isPreviewing = true
+            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            captureResolution = "\(dims.width)x\(dims.height)"
+        } catch {
+            print("[GUI] Preview failed: \(error)")
+            isPreviewing = false
+        }
+    }
+
+    func stopPreview() {
+        engine.stopPreview()
+        isPreviewing = false
+        captureResolution = ""
     }
 
     // MARK: - Capture control
@@ -188,13 +223,22 @@ final class CaptureViewModel: ObservableObject {
     func stopCapture() {
         engine.stop()
         isCapturing = false
+        // engine.stop() falls back to preview mode automatically
+        isPreviewing = engine.isPreviewing
         stopStatusTimer()
         statusMessage = "Stopped"
-        captureResolution = ""
         liveFPS = 0
         droppedFrames = 0
         fpsHistory = []
         syncState()
+
+        // Update resolution from the still-connected device
+        if isPreviewing, let device = selectedDevice {
+            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            captureResolution = "\(dims.width)x\(dims.height)"
+        } else {
+            captureResolution = ""
+        }
     }
 
     // MARK: - Actions

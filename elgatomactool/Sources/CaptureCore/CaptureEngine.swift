@@ -37,6 +37,7 @@ public final class CaptureEngine: NSObject {
     private let captureQueue = DispatchQueue(label: "capture.output", qos: .userInteractive)
     private var device: AVCaptureDevice?
     private var isRunning = false
+    private(set) public var isPreviewing = false
     private var recordingFormatDesc: CMFormatDescription?
 
     public init(replayDuration: Double = 30, bitrateMbps: Int = 20) {
@@ -66,28 +67,8 @@ public final class CaptureEngine: NSObject {
         try start(with: device)
     }
 
-    /// Start capture with a specific device.
-    public func start(with device: AVCaptureDevice) throws {
-        // Check camera permission
-        let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
-        guard authStatus == .authorized else {
-            print("[Capture] Camera access status: \(authStatus.rawValue) (0=notDetermined, 1=restricted, 2=denied, 3=authorized)")
-            throw CaptureError.cameraAccessDenied
-        }
-
-        // Stop any existing session
-        if isRunning { stop() }
-
-        self.device = device
-        print("[Capture] Using device: \(device.localizedName)")
-        print("[Capture] Device formats count: \(device.formats.count)")
-
-        // For capture cards like Cam Link 4K, the device reflects the HDMI input
-        // signal — trying to switch formats can fail. Prefer the device's current
-        // active format, then fall back to bestFormat scoring.
-        let format: AVCaptureDevice.Format
-        let targetFPS: Double
-
+    /// Resolve the best format & FPS for a device. Shared by preview and full capture.
+    private func resolveFormat(for device: AVCaptureDevice) throws -> (AVCaptureDevice.Format, Double) {
         let activeRanges = device.activeFormat.videoSupportedFrameRateRanges
         let activeDims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         let activeMaxFPS = activeRanges.map(\.maxFrameRate).max() ?? 0
@@ -95,38 +76,29 @@ public final class CaptureEngine: NSObject {
         print("[Capture] Active format: \(activeDims.width)x\(activeDims.height), fps ranges: \(activeRanges.map { "\($0.minFrameRate)-\($0.maxFrameRate)" })")
 
         if activeDims.width >= 640 && activeMaxFPS >= 1.0 {
-            // Device already has a usable active format — use it directly
-            // This is critical for capture cards that mirror HDMI input
-            format = device.activeFormat
-            targetFPS = min(activeMaxFPS, 60)
             print("[Capture] Using device's active format directly")
+            return (device.activeFormat, min(activeMaxFPS, 60))
         } else if let (bestFormat, bestRange) = DeviceDiscovery.bestFormat(for: device) {
-            format = bestFormat
-            targetFPS = min(bestRange.maxFrameRate, 60)
             print("[Capture] Using best scored format")
+            return (bestFormat, min(bestRange.maxFrameRate, 60))
         } else if !device.formats.isEmpty {
-            format = device.activeFormat
-            targetFPS = activeMaxFPS > 0 ? min(activeMaxFPS, 60) : 30
+            let fps = activeMaxFPS > 0 ? min(activeMaxFPS, 60) : 30.0
             print("[Capture] Using device's active format as last resort")
+            return (device.activeFormat, fps)
         } else {
             print("[Capture] No formats available. All formats for \(device.localizedName):")
             DeviceDiscovery.printDevices()
             throw CaptureError.noSupportedFormat
         }
+    }
 
-        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-        let timescale = CMTimeScale(max(targetFPS, 1))
-
-        print("[Capture] Configuring: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps (timescale=\(timescale))")
-
-        // Only change format/fps if we picked something different from active
+    /// Configure device format if needed. Shared by preview and full capture.
+    private func configureDevice(_ device: AVCaptureDevice, format: AVCaptureDevice.Format, targetFPS: Double) {
         let needsFormatChange = format !== device.activeFormat
         print("[Capture] Format change needed: \(needsFormatChange)")
 
-        // Configure device — capture cards like Cam Link 4K mirror the HDMI input
-        // signal, so setting frame duration hangs forever. Only configure if we're
-        // actually changing the format.
         if needsFormatChange {
+            let timescale = CMTimeScale(max(targetFPS, 1))
             do {
                 try device.lockForConfiguration()
                 device.activeFormat = format
@@ -139,12 +111,33 @@ public final class CaptureEngine: NSObject {
         } else {
             print("[Capture] Skipping device config (already using active format)")
         }
+    }
 
-        print("[Capture] Format: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps")
+    // MARK: - Preview (lightweight, no encoder)
+
+    /// Start a preview-only session: adds device input and runs the session so
+    /// AVCaptureVideoPreviewLayer shows live video, but does NOT start the encoder
+    /// or video data output.
+    public func startPreview(with device: AVCaptureDevice) throws {
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        guard authStatus == .authorized else {
+            throw CaptureError.cameraAccessDenied
+        }
+
+        // Tear down any existing state
+        if isRunning { stop() }
+        if isPreviewing { stopPreview() }
+
+        self.device = device
+        print("[Preview] Starting preview for: \(device.localizedName)")
+
+        let (format, targetFPS) = try resolveFormat(for: device)
+        configureDevice(device, format: format, targetFPS: targetFPS)
+
+        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        print("[Preview] Format: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps")
 
         captureSession.beginConfiguration()
-
-        // Remove existing inputs/outputs
         for input in captureSession.inputs { captureSession.removeInput(input) }
         for output in captureSession.outputs { captureSession.removeOutput(output) }
 
@@ -154,36 +147,131 @@ public final class CaptureEngine: NSObject {
             throw CaptureError.captureSessionFailed("Cannot add device input")
         }
         captureSession.addInput(input)
-
-        let output = AVCaptureVideoDataOutput()
-        // Let AVFoundation pick the best pixel format for this device
-        // instead of forcing NV12 which some devices don't support
-        output.alwaysDiscardsLateVideoFrames = true
-        output.setSampleBufferDelegate(self, queue: captureQueue)
-
-        guard captureSession.canAddOutput(output) else {
-            captureSession.commitConfiguration()
-            throw CaptureError.captureSessionFailed("Cannot add video output")
-        }
-        captureSession.addOutput(output)
-
         captureSession.commitConfiguration()
-        print("[Capture] Session configured, starting encoder...")
 
-        // Start encoder with actual dimensions
-        encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
-        try encoder.start()
-
-        print("[Capture] Starting capture session...")
         captureSession.startRunning()
+        isPreviewing = true
+        print("[Preview] Live preview running")
+    }
+
+    /// Stop preview-only session.
+    public func stopPreview() {
+        guard isPreviewing, !isRunning else { return }
+        captureSession.stopRunning()
+        captureSession.beginConfiguration()
+        for input in captureSession.inputs { captureSession.removeInput(input) }
+        captureSession.commitConfiguration()
+        isPreviewing = false
+        self.device = nil
+        print("[Preview] Stopped")
+    }
+
+    // MARK: - Full capture (encoder + replay buffer)
+
+    /// Start full capture with a specific device. If already previewing the same
+    /// device, upgrades the session in-place by adding the video data output and
+    /// starting the encoder — no visible glitch in the preview.
+    public func start(with device: AVCaptureDevice) throws {
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        guard authStatus == .authorized else {
+            print("[Capture] Camera access status: \(authStatus.rawValue)")
+            throw CaptureError.cameraAccessDenied
+        }
+
+        if isRunning { stop() }
+
+        let alreadyPreviewing = isPreviewing && self.device?.uniqueID == device.uniqueID
+
+        if !alreadyPreviewing {
+            // Need full setup from scratch
+            if isPreviewing { stopPreview() }
+
+            self.device = device
+            print("[Capture] Using device: \(device.localizedName)")
+
+            let (format, targetFPS) = try resolveFormat(for: device)
+            configureDevice(device, format: format, targetFPS: targetFPS)
+
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            print("[Capture] Format: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps")
+
+            captureSession.beginConfiguration()
+            for input in captureSession.inputs { captureSession.removeInput(input) }
+            for output in captureSession.outputs { captureSession.removeOutput(output) }
+
+            let input = try AVCaptureDeviceInput(device: device)
+            guard captureSession.canAddInput(input) else {
+                captureSession.commitConfiguration()
+                throw CaptureError.captureSessionFailed("Cannot add device input")
+            }
+            captureSession.addInput(input)
+
+            let output = AVCaptureVideoDataOutput()
+            output.alwaysDiscardsLateVideoFrames = true
+            output.setSampleBufferDelegate(self, queue: captureQueue)
+            guard captureSession.canAddOutput(output) else {
+                captureSession.commitConfiguration()
+                throw CaptureError.captureSessionFailed("Cannot add video output")
+            }
+            captureSession.addOutput(output)
+            captureSession.commitConfiguration()
+
+            encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
+            try encoder.start()
+
+            captureSession.startRunning()
+        } else {
+            // Upgrade from preview: add output + encoder while session is running
+            print("[Capture] Upgrading preview to full capture")
+
+            let (format, targetFPS) = try resolveFormat(for: device)
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+
+            captureSession.beginConfiguration()
+            for output in captureSession.outputs { captureSession.removeOutput(output) }
+
+            let output = AVCaptureVideoDataOutput()
+            output.alwaysDiscardsLateVideoFrames = true
+            output.setSampleBufferDelegate(self, queue: captureQueue)
+            guard captureSession.canAddOutput(output) else {
+                captureSession.commitConfiguration()
+                throw CaptureError.captureSessionFailed("Cannot add video output")
+            }
+            captureSession.addOutput(output)
+            captureSession.commitConfiguration()
+
+            encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
+            try encoder.start()
+        }
+
+        isPreviewing = false
         isRunning = true
         print("[Capture] Pipeline running")
     }
 
+    /// Stop the full capture pipeline. If the device is still available, falls back
+    /// to preview-only mode so the user keeps seeing the video feed.
     public func stop() {
-        captureSession.stopRunning()
+        let wasDevice = device
         encoder.stop()
+
+        // Remove video data output but keep the input for preview
+        captureSession.beginConfiguration()
+        for output in captureSession.outputs { captureSession.removeOutput(output) }
+        captureSession.commitConfiguration()
+
         isRunning = false
+
+        // Fall back to preview if we still have a device input
+        if wasDevice != nil && !captureSession.inputs.isEmpty {
+            isPreviewing = true
+            // Session is still running — preview layer continues to show video
+            print("[Capture] Stopped capture, fell back to preview")
+        } else {
+            captureSession.stopRunning()
+            isPreviewing = false
+            print("[Capture] Stopped capture and preview")
+        }
     }
 
     // MARK: - Actions
