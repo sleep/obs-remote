@@ -23,8 +23,10 @@ public final class CaptureEngine: NSObject {
     private(set) public var liveFPS: Double = 0
     private(set) public var droppedFrames: Int = 0
 
-    // Live bitrate tracking (bytes accumulated since last sample)
-    private var encodedBytesAccum: Int = 0
+    // Live bitrate tracking — wall-clock based, immune to timer jitter
+    private var encodedBytesTotal: Int64 = 0
+    private var lastBitrateBytes: Int64 = 0
+    private var lastBitrateTime: CFAbsoluteTime = 0
     private(set) public var liveBitrateMbps: Double = 0
 
     /// Called on the 1s timer to snapshot the frame/drop counters.
@@ -37,13 +39,20 @@ public final class CaptureEngine: NSObject {
         fpsLock.unlock()
     }
 
-    /// Called on the 1s timer to snapshot and reset the bitrate accumulator.
-    /// Separate from sampleFPS so that non-timer syncState calls don't drain it.
+    /// Compute live bitrate from wall-clock elapsed time and bytes encoded.
     public func sampleBitrate() {
+        let now = CFAbsoluteTimeGetCurrent()
         fpsLock.lock()
-        liveBitrateMbps = Double(encodedBytesAccum) * 8.0 / 1_000_000.0
-        encodedBytesAccum = 0
+        let totalBytes = encodedBytesTotal
         fpsLock.unlock()
+
+        let elapsed = now - lastBitrateTime
+        if elapsed > 0.1 {
+            let deltaBytes = totalBytes - lastBitrateBytes
+            liveBitrateMbps = Double(deltaBytes) * 8.0 / elapsed / 1_000_000.0
+            lastBitrateBytes = totalBytes
+            lastBitrateTime = now
+        }
     }
 
     // MARK: - Audio metering
@@ -563,7 +572,7 @@ public final class CaptureEngine: NSObject {
         }
 
         fpsLock.lock()
-        encodedBytesAccum += frame.size
+        encodedBytesTotal += Int64(frame.size)
         fpsLock.unlock()
 
         replayBuffer.append(frame)
