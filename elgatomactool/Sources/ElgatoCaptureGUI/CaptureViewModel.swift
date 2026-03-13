@@ -15,8 +15,8 @@ final class CaptureViewModel: ObservableObject {
             if let settings, settings.rememberLastDevice {
                 settings.lastDeviceUniqueID = selectedDevice?.uniqueID
             }
-            // Don't start preview if we're about to reconnect capture
-            if reconnectDeviceID == nil {
+            // Don't start preview if we're reconnecting capture
+            if reconnectDeviceID == nil && !isReconnecting {
                 startPreviewForSelectedDevice()
             }
         }
@@ -26,6 +26,7 @@ final class CaptureViewModel: ObservableObject {
     @Published var isPreviewing = false
     @Published var isCapturing = false
     @Published var isRecording = false
+    @Published var deviceDisconnected = false
     @Published var bufferDuration: Double = 0
     @Published var bufferFrameCount: Int = 0
     @Published var bufferSizeMB: Int = 0
@@ -115,6 +116,8 @@ final class CaptureViewModel: ObservableObject {
 
     /// UniqueID of the device we were capturing from before a disconnect.
     private var reconnectDeviceID: String?
+    /// True while attemptReconnect is in progress (waiting or retrying).
+    private var isReconnecting = false
     /// Consecutive seconds with 0 FPS while supposedly capturing — triggers reconnect.
     private var zeroFPSStreak: Int = 0
     private static let zeroFPSReconnectThreshold = 3
@@ -295,6 +298,7 @@ final class CaptureViewModel: ObservableObject {
     func stopCapture() {
         engine.stop()
         isCapturing = false
+        deviceDisconnected = false
         // engine.stop() falls back to preview mode automatically
         isPreviewing = engine.isPreviewing
         stopStatusTimer()
@@ -407,22 +411,13 @@ final class CaptureViewModel: ObservableObject {
         if wasOurDevice {
             reconnectDeviceID = device.uniqueID
 
-            if isCapturing {
-                engine.stop()
-                isCapturing = false
-                isPreviewing = false
-                stopStatusTimer()
-                liveFPS = 0
-                droppedFrames = 0
-                fpsHistory = []
-            }
-
-            captureResolution = ""
-            statusMessage = "Device disconnected — waiting to reconnect..."
+            // Don't stop the engine — keep the replay buffer and encoder state intact
+            // so the user can still save replays from the existing buffer.
+            // Just flag the disconnect so the UI shows an overlay.
+            deviceDisconnected = true
+            statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
             errorMessage = nil
-            // Keep selectedDevice as-is — we expect it to come back
         } else {
-            // Some other device disconnected, just update the list
             availableDevices = DeviceDiscovery.findCaptureDevices()
         }
     }
@@ -430,13 +425,12 @@ final class CaptureViewModel: ObservableObject {
     private func handleDeviceConnected() {
         print("[GUI] Device connected")
 
-        // If we're waiting to reconnect, don't refresh (which would trigger preview).
-        // Just try to reconnect directly with retries.
+        // Ignore duplicate connect events if we're already reconnecting
+        if isReconnecting { return }
+
         if let targetID = reconnectDeviceID {
             availableDevices = DeviceDiscovery.findCaptureDevices()
-            if let match = availableDevices.first(where: { $0.uniqueID == targetID }) {
-                reconnectDeviceID = nil
-                selectedDevice = match
+            if availableDevices.contains(where: { $0.uniqueID == targetID }) {
                 attemptReconnect(deviceID: targetID, retries: 5, delay: 1.0)
             }
         } else {
@@ -446,30 +440,42 @@ final class CaptureViewModel: ObservableObject {
 
     private func attemptReconnect(deviceID: String, retries: Int, delay: Double) {
         guard retries > 0 else {
+            isReconnecting = false
+            reconnectDeviceID = nil
             statusMessage = "Reconnect failed"
             errorMessage = "Could not reconnect to device after multiple attempts."
             return
         }
 
+        isReconnecting = true
         statusMessage = "Reconnecting..."
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            guard self.selectedDevice?.uniqueID == deviceID else { return }
-
-            // Refresh device list in case the AVCaptureDevice object changed
-            self.availableDevices = DeviceDiscovery.findCaptureDevices()
-            if let fresh = self.availableDevices.first(where: { $0.uniqueID == deviceID }) {
-                self.selectedDevice = fresh
+            // Bail if the user switched devices or reconnect was cancelled
+            guard self.reconnectDeviceID == deviceID else {
+                self.isReconnecting = false
+                return
             }
 
+            // Refresh the device object (may have changed across unplug/replug)
+            self.availableDevices = DeviceDiscovery.findCaptureDevices()
+            guard let fresh = self.availableDevices.first(where: { $0.uniqueID == deviceID }) else {
+                print("[GUI] Device not available yet, retrying (\(retries - 1) left)")
+                self.attemptReconnect(deviceID: deviceID, retries: retries - 1, delay: delay)
+                return
+            }
+            self.selectedDevice = fresh
+
             do {
-                try self.engine.start(with: self.selectedDevice!)
+                try self.engine.start(with: fresh)
+                self.reconnectDeviceID = nil
+                self.isReconnecting = false
+                self.deviceDisconnected = false
                 self.isCapturing = true
                 self.errorMessage = nil
-                self.statusMessage = "Capturing from \(self.selectedDevice!.localizedName)"
-                let dims = CMVideoFormatDescriptionGetDimensions(
-                    self.selectedDevice!.activeFormat.formatDescription)
+                self.statusMessage = "Capturing from \(fresh.localizedName)"
+                let dims = CMVideoFormatDescriptionGetDimensions(fresh.activeFormat.formatDescription)
                 self.captureResolution = "\(dims.width)x\(dims.height)"
                 self.startStatusTimer()
                 print("[GUI] Reconnected successfully")
