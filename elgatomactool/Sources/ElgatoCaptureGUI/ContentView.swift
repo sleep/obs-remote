@@ -45,13 +45,12 @@ struct ContentView: View {
                         .fill(.black)
                         .aspectRatio(16/9, contentMode: .fit)
                         .overlay {
-                            VStack(spacing: 12) {
-                                Image(systemName: "video.slash")
-                                    .font(.system(size: 48))
-                                    .foregroundStyle(.secondary)
+                            VStack(spacing: 16) {
+                                LogoView(size: 120)
                                 Text(vm.availableDevices.isEmpty
                                      ? "No capture devices found"
                                      : "Select a device to preview")
+                                    .font(.system(size: 12, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
                         }
