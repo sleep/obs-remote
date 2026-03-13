@@ -416,6 +416,9 @@ final class CaptureViewModel: ObservableObject {
             // Keep isCapturing = true so the UI still shows stats/controls/buffer info.
             if isCapturing {
                 engine.stop()
+                // stop() falls back to "preview" with the stale device input still attached.
+                // Force a full teardown so reconnect does a clean start, not a broken upgrade.
+                engine.stopPreview()
                 stopStatusTimer()
             }
 
