@@ -38,6 +38,7 @@ final class CaptureViewModel: ObservableObject {
     @Published var bufferDuration: Double = 0
     @Published var bufferFrameCount: Int = 0
     @Published var bufferSizeMB: Int = 0
+    @Published var liveBitrateMbps: Double = 0
     @Published var statusMessage: String = ""
     @Published var errorMessage: String?
     @Published var cameraAuthorized = false
@@ -478,6 +479,7 @@ final class CaptureViewModel: ObservableObject {
         bufferDuration = stats.duration
         bufferFrameCount = stats.frameCount
         bufferSizeMB = stats.bytes / 1_048_576
+        liveBitrateMbps = stats.duration > 0 ? Double(stats.bytes) * 8.0 / stats.duration / 1_000_000.0 : 0
 
         engine.sampleFPS()
         liveFPS = engine.liveFPS

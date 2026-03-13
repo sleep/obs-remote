@@ -297,7 +297,7 @@ struct ContentView: View {
                             Text("\(vm.bufferSizeMB)MB")
                         }
                         if showStat(.bitrate) {
-                            Text("\(vm.bitrateMbps)Mbps")
+                            Text(String(format: "%.1fMbps", vm.liveBitrateMbps))
                         }
                     }
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
