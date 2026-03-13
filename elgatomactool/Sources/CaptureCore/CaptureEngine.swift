@@ -44,6 +44,13 @@ public final class CaptureEngine: NSObject {
 
     /// Start capture with a specific device.
     public func start(with device: AVCaptureDevice) throws {
+        // Check camera permission
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        guard authStatus == .authorized else {
+            print("[Capture] Camera access status: \(authStatus.rawValue) (0=notDetermined, 1=restricted, 2=denied, 3=authorized)")
+            throw CaptureError.cameraAccessDenied
+        }
+
         // Stop any existing session
         if isRunning { stop() }
 
@@ -51,6 +58,14 @@ public final class CaptureEngine: NSObject {
         print("[Capture] Using device: \(device.localizedName)")
 
         guard let (format, _) = DeviceDiscovery.best1080p60Format(for: device) else {
+            // Print what formats ARE available for debugging
+            print("[Capture] Available formats for \(device.localizedName):")
+            for format in device.formats {
+                let desc = format.formatDescription
+                let dims = CMVideoFormatDescriptionGetDimensions(desc)
+                let maxFPS = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+                print("  \(dims.width)x\(dims.height) @ \(Int(maxFPS))fps")
+            }
             throw CaptureError.noSupportedFormat
         }
 

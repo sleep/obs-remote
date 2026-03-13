@@ -85,11 +85,18 @@ struct ContentView: View {
                     captureControls
                 }
 
-                // Status
+                // Error / status
                 if let error = vm.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .font(.caption)
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text(error)
+                            .foregroundStyle(.red)
+                    }
+                    .font(.callout)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
                 } else if !vm.statusMessage.isEmpty {
                     Text(vm.statusMessage)
                         .foregroundStyle(.secondary)

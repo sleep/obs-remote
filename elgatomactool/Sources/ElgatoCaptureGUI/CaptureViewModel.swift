@@ -18,6 +18,7 @@ final class CaptureViewModel: ObservableObject {
     @Published var bufferSizeMB: Int = 0
     @Published var statusMessage: String = ""
     @Published var errorMessage: String?
+    @Published var cameraAuthorized = false
 
     // Settings
     @Published var replayDuration: Double = 30
@@ -35,7 +36,33 @@ final class CaptureViewModel: ObservableObject {
             }
         }
 
+        checkCameraAccess()
         refreshDevices()
+    }
+
+    // MARK: - Camera permission
+
+    func checkCameraAccess() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            cameraAuthorized = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                Task { @MainActor in
+                    self.cameraAuthorized = granted
+                    if granted {
+                        self.refreshDevices()
+                    } else {
+                        self.errorMessage = "Camera access denied. Grant access in System Settings > Privacy & Security > Camera."
+                    }
+                }
+            }
+        case .denied, .restricted:
+            cameraAuthorized = false
+            errorMessage = "Camera access denied. Grant access in System Settings > Privacy & Security > Camera."
+        @unknown default:
+            break
+        }
     }
 
     // MARK: - Device management
@@ -43,9 +70,12 @@ final class CaptureViewModel: ObservableObject {
     func refreshDevices() {
         availableDevices = DeviceDiscovery.findCaptureDevices()
 
-        // Auto-select Elgato or similar if nothing is selected
         if selectedDevice == nil || !availableDevices.contains(where: { $0.uniqueID == selectedDevice?.uniqueID }) {
             selectedDevice = autoSelectDevice()
+        }
+
+        if availableDevices.isEmpty {
+            statusMessage = "No capture devices found. Plug in your Elgato and refresh."
         }
     }
 
@@ -63,10 +93,18 @@ final class CaptureViewModel: ObservableObject {
     // MARK: - Capture control
 
     func startCapture() {
+        guard cameraAuthorized else {
+            errorMessage = "Camera access not granted. Check System Settings > Privacy & Security > Camera."
+            return
+        }
+
         guard let device = selectedDevice else {
             errorMessage = "No device selected"
             return
         }
+
+        errorMessage = nil
+        statusMessage = "Starting capture..."
 
         do {
             try engine.start(with: device)
@@ -77,6 +115,8 @@ final class CaptureViewModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
             isCapturing = false
+            statusMessage = ""
+            print("[GUI] Start failed: \(error)")
         }
     }
 
@@ -92,7 +132,6 @@ final class CaptureViewModel: ObservableObject {
 
     func toggleRecording() {
         engine.toggleRecording()
-        // State will update via onStateChange
         if !engine.recorder.isRecording {
             statusMessage = "Recording started"
         } else {
@@ -109,7 +148,6 @@ final class CaptureViewModel: ObservableObject {
     func saveReplay() {
         engine.saveReplay(lastSeconds: replayDuration)
         statusMessage = "Saving replay..."
-        // Will update via onStateChange
     }
 
     func openOutputFolder() {
