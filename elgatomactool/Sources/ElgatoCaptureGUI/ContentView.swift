@@ -3,8 +3,10 @@ import AVFoundation
 import CaptureCore
 
 struct ContentView: View {
-    @StateObject private var vm = CaptureViewModel()
+    @EnvironmentObject var vm: CaptureViewModel
+    @EnvironmentObject var settings: AppSettings
     @State private var showReplaySettings = false
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,12 +47,13 @@ struct ContentView: View {
                         .fill(.black)
                         .aspectRatio(16/9, contentMode: .fit)
                         .overlay {
-                            VStack(spacing: 16) {
-                                LogoView(size: 120)
+                            VStack(spacing: 12) {
+                                Image(systemName: "video.slash")
+                                    .font(.system(size: 48))
+                                    .foregroundStyle(.secondary)
                                 Text(vm.availableDevices.isEmpty
                                      ? "No capture devices found"
                                      : "Select a device to preview")
-                                    .font(.system(size: 12, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -186,6 +189,13 @@ struct ContentView: View {
             .padding(16)
         }
         .frame(minWidth: 640, minHeight: 480)
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .environmentObject(settings)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showSettingsSheet)) { _ in
+            showSettings = true
+        }
         .onAppear {
             vm.refreshDevices()
         }
@@ -218,6 +228,13 @@ struct ContentView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Refresh device list")
+
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .help("Preferences")
 
             Spacer()
 

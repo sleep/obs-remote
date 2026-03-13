@@ -10,7 +10,7 @@ public final class CaptureEngine: NSObject {
     public let captureSession = AVCaptureSession()
     public let encoder: HardwareEncoder
     public let replayBuffer: ReplayBuffer
-    public let recorder = Recorder()
+    public private(set) var recorder: Recorder
 
     private(set) public var latestPixelBuffer: CVPixelBuffer?
     private let latestFrameLock = NSLock()
@@ -43,6 +43,7 @@ public final class CaptureEngine: NSObject {
     public init(replayDuration: Double = 30, bitrateMbps: Int = 20) {
         self.encoder = HardwareEncoder(bitrateMbps: bitrateMbps)
         self.replayBuffer = ReplayBuffer(duration: replayDuration)
+        self.recorder = Recorder()
         super.init()
 
         encoder.onEncodedFrame = { [weak self] frame in
@@ -55,6 +56,13 @@ public final class CaptureEngine: NSObject {
     /// Update replay buffer limits at runtime.
     public func updateReplayLimits(duration: Double? = nil, maxBytes: Int? = nil) {
         replayBuffer.updateLimits(duration: duration, maxBytes: maxBytes)
+    }
+
+    /// Replace the recorder with one pointing at a new output directory.
+    /// Only allowed when not actively recording.
+    public func setOutputDirectory(_ url: URL) {
+        guard !recorder.isRecording else { return }
+        recorder = Recorder(outputDir: url)
     }
 
     // MARK: - Setup & Start
@@ -303,7 +311,7 @@ public final class CaptureEngine: NSObject {
 
         let stats = replayBuffer.stats
         let filename = Recorder.timestampedFilename(prefix: "replay", ext: "mp4")
-        let url = Recorder.defaultOutputDir().appendingPathComponent(filename)
+        let url = recorder.outputDir.appendingPathComponent(filename)
 
         print("[Capture] Saving replay (\(String(format: "%.1f", stats.duration))s, \(frames.count) frames)...")
 
@@ -338,7 +346,7 @@ public final class CaptureEngine: NSObject {
         }
 
         let filename = Recorder.timestampedFilename(prefix: "screenshot", ext: "png")
-        let url = Recorder.defaultOutputDir().appendingPathComponent(filename)
+        let url = recorder.outputDir.appendingPathComponent(filename)
 
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),

@@ -8,7 +8,7 @@ public final class Recorder {
     private var videoInput: AVAssetWriterInput?
     private var isWriting = false
     private var sessionStarted = false
-    private let outputDir: URL
+    public let outputDir: URL
 
     public init(outputDir: URL? = nil) {
         self.outputDir = outputDir ?? Recorder.defaultOutputDir()

@@ -12,6 +12,9 @@ final class CaptureViewModel: ObservableObject {
     @Published var selectedDevice: AVCaptureDevice? {
         didSet {
             guard selectedDevice?.uniqueID != oldValue?.uniqueID else { return }
+            if let settings, settings.rememberLastDevice {
+                settings.lastDeviceUniqueID = selectedDevice?.uniqueID
+            }
             startPreviewForSelectedDevice()
         }
     }
@@ -39,15 +42,25 @@ final class CaptureViewModel: ObservableObject {
     @Published var ramHistory: [Double] = []
     @Published var diskHistory: [Double] = []
 
-    // Settings
+    // Settings — synced from AppSettings
     @Published var replayDuration: Double = 30 {
-        didSet { applyReplayLimits() }
+        didSet {
+            applyReplayLimits()
+            settings?.replayDuration = replayDuration
+        }
     }
     @Published var customReplayDuration: String = "" // for custom entry
     @Published var maxReplayRAM: Int = 0 { // bytes, 0 = unlimited
-        didSet { applyReplayLimits() }
+        didSet {
+            applyReplayLimits()
+            settings?.maxReplayRAM = maxReplayRAM
+        }
     }
-    @Published var bitrateMbps: Int = 20
+    @Published var bitrateMbps: Int = 20 {
+        didSet { settings?.bitrateMbps = bitrateMbps }
+    }
+
+    private weak var settings: AppSettings?
 
     /// Preset durations in seconds
     static let replayPresets: [Double] = [15, 30, 60, 90, 120, 180, 300, 600]
@@ -92,9 +105,16 @@ final class CaptureViewModel: ObservableObject {
     let engine: CaptureEngine
     let systemStats = SystemStatsMonitor()
     private var statusTimer: Timer?
+    private var settingsCancellables: Set<AnyCancellable> = []
 
-    init() {
-        self.engine = CaptureEngine(replayDuration: 30, bitrateMbps: 20)
+    init(settings: AppSettings) {
+        self.settings = settings
+        self.replayDuration = settings.replayDuration
+        self.maxReplayRAM = settings.maxReplayRAM
+        self.bitrateMbps = settings.bitrateMbps
+        self.engine = CaptureEngine(replayDuration: settings.replayDuration,
+                                    bitrateMbps: settings.bitrateMbps)
+        engine.setOutputDirectory(settings.outputDirectory)
 
         engine.onStateChange = { [weak self] in
             Task { @MainActor in
@@ -102,8 +122,31 @@ final class CaptureViewModel: ObservableObject {
             }
         }
 
+        settings.$outputDirectoryPath
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.engine.setOutputDirectory(settings.outputDirectory)
+            }
+            .store(in: &settingsCancellables)
+
         checkCameraAccess()
         refreshDevices()
+    }
+
+    /// Try to reconnect to the last-used device and optionally start capture.
+    func autoConnectLastDevice() {
+        guard let settings, settings.rememberLastDevice,
+              let savedID = settings.lastDeviceUniqueID else { return }
+
+        refreshDevices()
+
+        if let match = availableDevices.first(where: { $0.uniqueID == savedID }) {
+            selectedDevice = match
+            if settings.autoStartCapture {
+                startCapture()
+            }
+        }
     }
 
     // MARK: - Camera permission
@@ -265,7 +308,7 @@ final class CaptureViewModel: ObservableObject {
     }
 
     func openOutputFolder() {
-        let url = Recorder.defaultOutputDir()
+        let url = engine.recorder.outputDir
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         NSWorkspace.shared.open(url)
     }
