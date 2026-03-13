@@ -94,7 +94,20 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 420, height: 380)
+        .frame(width: 420, height: 520)
+    }
+
+    private func statusBarBinding(for field: AppSettings.StatusBarField) -> Binding<Bool> {
+        Binding(
+            get: { settings.statusBarFields.contains(field) },
+            set: { enabled in
+                if enabled {
+                    settings.statusBarFields.insert(field)
+                } else {
+                    settings.statusBarFields.remove(field)
+                }
+            }
+        )
     }
 
     private func chooseOutputDirectory() {
