@@ -374,8 +374,13 @@ struct ContentView: View {
     // MARK: - Device selector
 
     private var deviceSelector: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
+            // Video device row
+            HStack(spacing: 8) {
+                Image(systemName: "video.fill")
+                    .frame(width: 16)
+                    .foregroundStyle(.secondary)
+
                 Picker("Device", selection: $vm.selectedDevice) {
                     if vm.availableDevices.isEmpty {
                         Text("No devices").tag(nil as AVCaptureDevice?)
@@ -392,6 +397,7 @@ struct ContentView: View {
                     }
                 }
                 .labelsHidden()
+                .frame(maxWidth: 260)
 
                 Button {
                     vm.refreshDevices()
@@ -425,10 +431,10 @@ struct ContentView: View {
                 }
             }
 
-            // Audio device selector + passthrough
+            // Audio device row
             HStack(spacing: 8) {
                 Image(systemName: "waveform")
-                    .font(.system(size: 11))
+                    .frame(width: 16)
                     .foregroundStyle(.secondary)
 
                 Picker("Audio", selection: $vm.selectedAudioDevice) {
@@ -445,14 +451,20 @@ struct ContentView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 250)
+                .frame(maxWidth: 260)
+
+                Button {
+                    vm.refreshDevices()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh audio device list")
 
                 Button {
                     vm.audioPassthroughEnabled.toggle()
                 } label: {
                     Image(systemName: vm.audioPassthroughEnabled
                           ? "speaker.wave.2.fill" : "speaker.slash")
-                        .font(.system(size: 12))
                         .foregroundStyle(vm.audioPassthroughEnabled ? .green : .secondary)
                 }
                 .help(vm.audioPassthroughEnabled ? "Disable audio passthrough" : "Play audio through speakers")
