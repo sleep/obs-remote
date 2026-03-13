@@ -38,6 +38,26 @@ final class CaptureViewModel: ObservableObject {
     @Published var droppedFrames: Int = 0
     @Published var fpsHistory: [Double] = []
 
+    // Audio device selection
+    @Published var availableAudioDevices: [AVCaptureDevice] = []
+    @Published var selectedAudioDevice: AVCaptureDevice? {
+        didSet {
+            guard selectedAudioDevice?.uniqueID != oldValue?.uniqueID else { return }
+            engine.setAudioInputDevice(selectedAudioDevice)
+            hasAudio = engine.hasAudioInput
+            audioHistory = []
+        }
+    }
+    @Published var audioPassthroughEnabled: Bool = false {
+        didSet {
+            if audioPassthroughEnabled {
+                engine.startPassthrough()
+            } else {
+                engine.stopPassthrough()
+            }
+        }
+    }
+
     // Audio levels (linear 0–1)
     @Published var audioLevel: Double = 0
     @Published var audioPeakLevel: Double = 0
@@ -117,6 +137,7 @@ final class CaptureViewModel: ObservableObject {
     let engine: CaptureEngine
     let systemStats = SystemStatsMonitor()
     private var statusTimer: Timer?
+    private var audioMeterTimer: Timer?
     private var settingsCancellables: Set<AnyCancellable> = []
     private var appNapActivity: NSObjectProtocol?
 
@@ -214,11 +235,17 @@ final class CaptureViewModel: ObservableObject {
 
     func refreshDevices() {
         availableDevices = DeviceDiscovery.findCaptureDevices()
+        availableAudioDevices = DeviceDiscovery.findAudioDevices()
 
         // Don't change selection while waiting for a device to come back
         if reconnectDeviceID == nil,
            selectedDevice == nil || !availableDevices.contains(where: { $0.uniqueID == selectedDevice?.uniqueID }) {
             selectedDevice = autoSelectDevice()
+        }
+
+        // Auto-select audio device matching video device name if none selected
+        if selectedAudioDevice == nil || !availableAudioDevices.contains(where: { $0.uniqueID == selectedAudioDevice?.uniqueID }) {
+            selectedAudioDevice = autoSelectAudioDevice()
         }
 
         if availableDevices.isEmpty {
@@ -229,6 +256,24 @@ final class CaptureViewModel: ObservableObject {
         if selectedDevice != nil && !isCapturing && !isPreviewing {
             startPreviewForSelectedDevice()
         }
+    }
+
+    private func autoSelectAudioDevice() -> AVCaptureDevice? {
+        guard let videoDevice = selectedDevice else { return nil }
+        let videoName = videoDevice.localizedName.lowercased()
+
+        // Exact name match
+        if let match = availableAudioDevices.first(where: {
+            $0.localizedName == videoDevice.localizedName
+        }) {
+            return match
+        }
+
+        // Partial name match (e.g. "Cam Link 4K" in audio device name)
+        return availableAudioDevices.first(where: {
+            let audioName = $0.localizedName.lowercased()
+            return audioName.contains(videoName) || videoName.contains(audioName)
+        })
     }
 
     private func autoSelectDevice() -> AVCaptureDevice? {
@@ -252,9 +297,15 @@ final class CaptureViewModel: ObservableObject {
         do {
             try engine.startPreview(with: device)
             isPreviewing = true
-            hasAudio = engine.hasAudioInput
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             captureResolution = "\(dims.width)x\(dims.height)"
+
+            // Set up audio from the selected audio device
+            if let audioDevice = selectedAudioDevice {
+                engine.setAudioInputDevice(audioDevice)
+                hasAudio = engine.hasAudioInput
+                if hasAudio { startAudioMeterTimer() }
+            }
         } catch {
             print("[GUI] Preview failed: \(error)")
             isPreviewing = false
@@ -265,6 +316,8 @@ final class CaptureViewModel: ObservableObject {
         engine.stopPreview()
         isPreviewing = false
         captureResolution = ""
+        hasAudio = false
+        stopAudioMeterTimer()
     }
 
     // MARK: - Capture control
@@ -293,6 +346,13 @@ final class CaptureViewModel: ObservableObject {
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             captureResolution = "\(dims.width)x\(dims.height)"
 
+            // Set up audio from the selected audio device
+            stopAudioMeterTimer()
+            if let audioDevice = selectedAudioDevice {
+                engine.setAudioInputDevice(audioDevice)
+                hasAudio = engine.hasAudioInput
+            }
+
             startStatusTimer()
         } catch {
             errorMessage = error.localizedDescription
@@ -316,6 +376,8 @@ final class CaptureViewModel: ObservableObject {
         audioLevel = 0
         audioPeakLevel = 0
         audioHistory = []
+        hasAudio = false
+        audioPassthroughEnabled = false
         syncState()
 
         // Update resolution from the still-connected device
@@ -331,18 +393,31 @@ final class CaptureViewModel: ObservableObject {
 
     func toggleRecording() {
         let wasRecording = engine.recorder.isRecording
-        engine.toggleRecording()
         if wasRecording {
-            statusMessage = "Recording stopped"
+            statusMessage = "Stopping recording..."
         } else {
-            statusMessage = "Recording started"
+            statusMessage = "Starting recording..."
+        }
+        Task.detached { [weak self] in
+            self?.engine.toggleRecording()
+            await MainActor.run {
+                guard let self else { return }
+                self.statusMessage = wasRecording ? "Recording stopped" : "Recording started"
+                self.syncState()
+            }
         }
     }
 
     func takeScreenshot() {
-        engine.takeScreenshot()
-        statusMessage = "Screenshot saved"
-        clearStatusAfterDelay()
+        statusMessage = "Saving screenshot..."
+        Task.detached { [weak self] in
+            self?.engine.takeScreenshot()
+            await MainActor.run {
+                guard let self else { return }
+                self.statusMessage = "Screenshot saved"
+                self.clearStatusAfterDelay()
+            }
+        }
     }
 
     func saveReplay() {
@@ -422,6 +497,33 @@ final class CaptureViewModel: ObservableObject {
         }
     }
 
+    /// Lightweight timer for audio metering during preview (no capture stats needed).
+    private func startAudioMeterTimer() {
+        guard audioMeterTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.sampleAudioOnly()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        audioMeterTimer = timer
+    }
+
+    private func stopAudioMeterTimer() {
+        audioMeterTimer?.invalidate()
+        audioMeterTimer = nil
+    }
+
+    private func sampleAudioOnly() {
+        guard hasAudio else { return }
+        let levels = engine.sampleAudioLevels()
+        audioLevel = Double(levels.rms)
+        audioPeakLevel = Double(levels.peak)
+        let peakDB = levels.peak > 0 ? max(20 * log10(levels.peak), -60) : -60
+        audioHistory.append(Double(peakDB))
+        if audioHistory.count > 120 { audioHistory.removeFirst(audioHistory.count - 120) }
+    }
+
     // MARK: - Device reconnection
 
     private func handleDeviceDisconnected(_ notification: Notification) {
@@ -499,6 +601,11 @@ final class CaptureViewModel: ObservableObject {
                 self.statusMessage = "Capturing from \(fresh.localizedName)"
                 let dims = CMVideoFormatDescriptionGetDimensions(fresh.activeFormat.formatDescription)
                 self.captureResolution = "\(dims.width)x\(dims.height)"
+                // Re-attach audio
+                if let audioDevice = self.selectedAudioDevice {
+                    self.engine.setAudioInputDevice(audioDevice)
+                    self.hasAudio = self.engine.hasAudioInput
+                }
                 self.startStatusTimer()
                 print("[GUI] Reconnected successfully")
             } catch {

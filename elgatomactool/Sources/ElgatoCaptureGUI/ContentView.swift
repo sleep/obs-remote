@@ -123,6 +123,23 @@ struct ContentView: View {
                 // Stats overlay
                 if vm.isCapturing {
                     statsOverlay
+                } else if vm.hasAudio && vm.isPreviewing {
+                    // Show audio graph during preview when audio device is active
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            AudioGraphView(
+                                level: vm.audioLevel,
+                                peak: vm.audioPeakLevel,
+                                history: vm.audioHistory
+                            )
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                            .padding(8)
+                        }
+                    }
                 }
 
                 // Disconnect overlay — shown on top of the frozen video/buffer
@@ -307,51 +324,86 @@ struct ContentView: View {
     // MARK: - Device selector
 
     private var deviceSelector: some View {
-        HStack(spacing: 12) {
-            Picker("Device", selection: $vm.selectedDevice) {
-                if vm.availableDevices.isEmpty {
-                    Text("No devices").tag(nil as AVCaptureDevice?)
-                }
-                ForEach(vm.availableDevices, id: \.uniqueID) { device in
-                    HStack {
-                        if isElgatoDevice(device) {
-                            Image(systemName: "star.fill")
-                                .foregroundStyle(.yellow)
-                        }
-                        Text(device.localizedName)
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                Picker("Device", selection: $vm.selectedDevice) {
+                    if vm.availableDevices.isEmpty {
+                        Text("No devices").tag(nil as AVCaptureDevice?)
                     }
-                    .tag(device as AVCaptureDevice?)
+                    ForEach(vm.availableDevices, id: \.uniqueID) { device in
+                        HStack {
+                            if isElgatoDevice(device) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(.yellow)
+                            }
+                            Text(device.localizedName)
+                        }
+                        .tag(device as AVCaptureDevice?)
+                    }
+                }
+                .labelsHidden()
+
+                Button {
+                    vm.refreshDevices()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh device list")
+
+                Button {
+                    showSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .help("Preferences")
+
+                Spacer()
+
+                if vm.isCapturing {
+                    Button("Stop") {
+                        vm.stopCapture()
+                    }
+                    .tint(.red)
+                } else {
+                    Button("Start Capture") {
+                        vm.startCapture()
+                    }
+                    .disabled(vm.selectedDevice == nil)
+                    .tint(.green)
                 }
             }
-            .labelsHidden()
 
-            Button {
-                vm.refreshDevices()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .help("Refresh device list")
+            // Audio device selector + passthrough
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
 
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "gearshape")
-            }
-            .help("Preferences")
-
-            Spacer()
-
-            if vm.isCapturing {
-                Button("Stop") {
-                    vm.stopCapture()
+                Picker("Audio", selection: $vm.selectedAudioDevice) {
+                    Text("None").tag(nil as AVCaptureDevice?)
+                    ForEach(vm.availableAudioDevices, id: \.uniqueID) { device in
+                        Text(device.localizedName).tag(device as AVCaptureDevice?)
+                    }
                 }
-                .tint(.red)
-            } else {
-                Button("Start Capture") {
-                    vm.startCapture()
+                .labelsHidden()
+                .frame(maxWidth: 250)
+
+                Button {
+                    vm.audioPassthroughEnabled.toggle()
+                } label: {
+                    Image(systemName: vm.audioPassthroughEnabled
+                          ? "speaker.wave.2.fill" : "speaker.slash")
+                        .font(.system(size: 12))
+                        .foregroundStyle(vm.audioPassthroughEnabled ? .green : .secondary)
                 }
-                .disabled(vm.selectedDevice == nil)
-                .tint(.green)
+                .help(vm.audioPassthroughEnabled ? "Disable audio passthrough" : "Play audio through speakers")
+                .disabled(!vm.hasAudio)
+
+                if vm.hasAudio {
+                    AudioLevelBar(level: vm.audioPeakLevel, width: 60, height: 6)
+                }
+
+                Spacer()
             }
         }
     }
@@ -580,9 +632,10 @@ struct ControlButton: View {
             }
             .foregroundStyle(color)
             .frame(width: 80, height: 60)
+            .padding(6)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .padding(6)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 }

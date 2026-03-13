@@ -16,7 +16,8 @@ public final class Recorder {
 
     /// Start recording to a new MP4 file. Returns the file path.
     @discardableResult
-    public func startRecording(width: Int = 1920, height: Int = 1080) throws -> URL {
+    public func startRecording(width: Int = 1920, height: Int = 1080,
+                               sourceFormatHint: CMFormatDescription? = nil) throws -> URL {
         let filename = Recorder.timestampedFilename(prefix: "recording", ext: "mp4")
         let url = outputDir.appendingPathComponent(filename)
 
@@ -25,7 +26,8 @@ public final class Recorder {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 
         // nil outputSettings = passthrough (we provide already-encoded H.264 data)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
+                                       sourceFormatHint: sourceFormatHint)
         input.expectsMediaDataInRealTime = true
 
         writer.add(input)

@@ -47,6 +47,13 @@ public final class CaptureEngine: NSObject {
     /// Whether the capture session has an active audio input.
     private(set) public var hasAudioInput = false
 
+    // MARK: - Audio passthrough
+
+    private var passthroughEngine: AVAudioEngine?
+    private var playerNode: AVAudioPlayerNode?
+    private var passthroughFormat: AVAudioFormat?
+    private(set) public var isPassthroughEnabled = false
+
     /// Snapshot the audio levels accumulated since the last call and reset the accumulators.
     /// Returns levels in linear scale (0.0 … 1.0).
     public func sampleAudioLevels() -> (rms: Float, peak: Float) {
@@ -156,44 +163,47 @@ public final class CaptureEngine: NSObject {
 
     // MARK: - Audio setup
 
-    /// Try to add audio capture to the current session. Call within beginConfiguration/commitConfiguration.
-    private func addAudioOutput(for videoDevice: AVCaptureDevice) {
-        let output = AVCaptureAudioDataOutput()
-        output.setSampleBufferDelegate(self, queue: audioQueue)
+    /// Set the audio input device explicitly. Pass nil to remove audio input.
+    /// Can be called at any time — the capture session is reconfigured in place.
+    public func setAudioInputDevice(_ device: AVCaptureDevice?) {
+        captureSession.beginConfiguration()
+        removeAudioOutput()
 
-        // First check if the existing device input already provides audio
-        if captureSession.canAddOutput(output) {
-            captureSession.addOutput(output)
-            audioOutput = output
-            hasAudioInput = true
-            print("[Capture] Audio available from device input")
-            return
-        }
-
-        // Otherwise, look for a separate audio device with the same name
-        guard let audioDevice = findMatchingAudioDevice(for: videoDevice) else {
-            print("[Capture] No audio input available for \(videoDevice.localizedName)")
-            return
-        }
-
-        do {
-            let input = try AVCaptureDeviceInput(device: audioDevice)
-            if captureSession.canAddInput(input) {
-                captureSession.addInput(input)
-                audioDeviceInput = input
-                if captureSession.canAddOutput(output) {
-                    captureSession.addOutput(output)
-                    audioOutput = output
-                    hasAudioInput = true
-                    print("[Capture] Audio from separate device: \(audioDevice.localizedName)")
+        if let device {
+            do {
+                let input = try AVCaptureDeviceInput(device: device)
+                if captureSession.canAddInput(input) {
+                    captureSession.addInput(input)
+                    audioDeviceInput = input
                 }
+            } catch {
+                print("[Capture] Could not add audio input: \(error)")
             }
-        } catch {
-            print("[Capture] Could not add audio input: \(error)")
+
+            let output = AVCaptureAudioDataOutput()
+            // Force Float32 interleaved so metering + passthrough get a known format
+            output.audioSettings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 32,
+                AVLinearPCMIsFloatKey: true,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+            output.setSampleBufferDelegate(self, queue: audioQueue)
+            if captureSession.canAddOutput(output) {
+                captureSession.addOutput(output)
+                audioOutput = output
+                hasAudioInput = true
+                print("[Capture] Audio input set: \(device.localizedName)")
+            } else {
+                print("[Capture] Could not add audio output for \(device.localizedName)")
+            }
         }
+
+        captureSession.commitConfiguration()
     }
 
     /// Remove audio output and any separate audio device input from the session.
+    /// Must be called within beginConfiguration/commitConfiguration.
     private func removeAudioOutput() {
         if let output = audioOutput {
             captureSession.removeOutput(output)
@@ -212,26 +222,30 @@ public final class CaptureEngine: NSObject {
         audioLock.unlock()
     }
 
-    /// Find an audio device whose name matches the given video device.
-    private func findMatchingAudioDevice(for videoDevice: AVCaptureDevice) -> AVCaptureDevice? {
-        let audioDevices = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInMicrophone, .externalUnknown],
-            mediaType: .audio,
-            position: .unspecified
-        ).devices
+    /// Start playing captured audio through the default system output.
+    public func startPassthrough() {
+        guard !isPassthroughEnabled else { return }
+        isPassthroughEnabled = true
+        // Engine + player are lazily configured on first audio buffer
+        // (we need the sample rate from the format description)
+        print("[Capture] Audio passthrough enabled")
+    }
 
-        let videoName = videoDevice.localizedName.lowercased()
-
-        // Exact match first
-        if let match = audioDevices.first(where: { $0.localizedName == videoDevice.localizedName }) {
-            return match
+    /// Stop audio passthrough playback.
+    public func stopPassthrough() {
+        isPassthroughEnabled = false
+        playerNode?.stop()
+        if let engine = passthroughEngine, engine.isRunning {
+            engine.stop()
         }
-
-        // Partial match
-        return audioDevices.first(where: {
-            let audioName = $0.localizedName.lowercased()
-            return audioName.contains(videoName) || videoName.contains(audioName)
-        })
+        if let node = playerNode, let engine = passthroughEngine {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+        }
+        passthroughEngine = nil
+        playerNode = nil
+        passthroughFormat = nil
+        print("[Capture] Audio passthrough disabled")
     }
 
     // MARK: - Preview (lightweight, no encoder)
@@ -270,9 +284,6 @@ public final class CaptureEngine: NSObject {
             throw CaptureError.captureSessionFailed("Cannot add device input")
         }
         captureSession.addInput(input)
-
-        addAudioOutput(for: device)
-
         captureSession.commitConfiguration()
 
         captureSession.startRunning()
@@ -285,9 +296,11 @@ public final class CaptureEngine: NSObject {
         guard isPreviewing, !isRunning else { return }
         captureSession.stopRunning()
         captureSession.beginConfiguration()
+        // removeAudioOutput is called within begin/commit
         removeAudioOutput()
         for input in captureSession.inputs { captureSession.removeInput(input) }
         captureSession.commitConfiguration()
+        stopPassthrough()
         isPreviewing = false
         self.device = nil
         print("[Preview] Stopped")
@@ -343,9 +356,6 @@ public final class CaptureEngine: NSObject {
                 throw CaptureError.captureSessionFailed("Cannot add video output")
             }
             captureSession.addOutput(output)
-
-            addAudioOutput(for: device)
-
             captureSession.commitConfiguration()
 
             encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
@@ -373,12 +383,6 @@ public final class CaptureEngine: NSObject {
                 throw CaptureError.captureSessionFailed("Cannot add video output")
             }
             captureSession.addOutput(output)
-
-            // Add audio if not already present from preview
-            if audioOutput == nil {
-                addAudioOutput(for: device)
-            }
-
             captureSession.commitConfiguration()
 
             encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
@@ -444,8 +448,18 @@ public final class CaptureEngine: NSObject {
             }
         } else {
             do {
-                try recorder.startRecording()
-                recordingFormatDesc = nil
+                // Build format description from replay buffer so AVAssetWriterInput
+                // gets the required sourceFormatHint for passthrough MP4 writing.
+                let frames = replayBuffer.getReplayFrames(lastSeconds: 1)
+                let formatHint: CMFormatDescription?
+                if let keyframe = frames.first(where: { $0.isKeyframe }),
+                   let ps = keyframe.parameterSets {
+                    formatHint = makeFormatDescription(parameterSets: ps)
+                } else {
+                    formatHint = nil
+                }
+                recordingFormatDesc = formatHint
+                try recorder.startRecording(sourceFormatHint: formatHint)
                 DispatchQueue.main.async { self.onStateChange?() }
             } catch {
                 print("[Capture] Failed to start recording: \(error)")
@@ -699,5 +713,70 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         if rms > maxRMSSinceLastSample { maxRMSSinceLastSample = rms }
         if peak > maxPeakSinceLastSample { maxPeakSinceLastSample = peak }
         audioLock.unlock()
+
+        // Audio passthrough
+        if isPassthroughEnabled {
+            forwardToPassthrough(sampleBuffer, floatData: floatPtr, sampleCount: sampleCount)
+        }
+    }
+
+    private func forwardToPassthrough(_ sampleBuffer: CMSampleBuffer,
+                                       floatData: UnsafePointer<Float32>,
+                                       sampleCount: Int) {
+        // Lazy engine setup on first buffer (need format info from the sample)
+        if passthroughEngine == nil {
+            guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee else { return }
+
+            let channels = max(asbd.mChannelsPerFrame, 1)
+            guard let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: asbd.mSampleRate,
+                channels: channels,
+                interleaved: false
+            ) else { return }
+
+            let engine = AVAudioEngine()
+            let player = AVAudioPlayerNode()
+            engine.attach(player)
+            engine.connect(player, to: engine.mainMixerNode, format: format)
+
+            do {
+                try engine.start()
+                player.play()
+                passthroughEngine = engine
+                playerNode = player
+                passthroughFormat = format
+                print("[Capture] Passthrough started: \(Int(asbd.mSampleRate))Hz, \(channels)ch")
+            } catch {
+                print("[Capture] Passthrough engine failed to start: \(error)")
+                return
+            }
+        }
+
+        guard let format = passthroughFormat, let player = playerNode else { return }
+
+        let channels = Int(format.channelCount)
+        let framesPerChannel = sampleCount / channels
+        guard framesPerChannel > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                frameCapacity: AVAudioFrameCount(framesPerChannel))
+        else { return }
+        pcmBuffer.frameLength = AVAudioFrameCount(framesPerChannel)
+
+        // Source is interleaved Float32, destination is deinterleaved
+        if let channelData = pcmBuffer.floatChannelData {
+            if channels == 1 {
+                memcpy(channelData[0], floatData, framesPerChannel * MemoryLayout<Float32>.size)
+            } else {
+                for sample in 0..<framesPerChannel {
+                    for ch in 0..<channels {
+                        channelData[ch][sample] = floatData[sample * channels + ch]
+                    }
+                }
+            }
+        }
+
+        player.scheduleBuffer(pcmBuffer)
     }
 }

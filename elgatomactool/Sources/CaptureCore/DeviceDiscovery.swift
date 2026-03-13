@@ -14,6 +14,16 @@ public enum DeviceDiscovery {
         return discovery.devices
     }
 
+    /// Returns all audio input devices (external + built-in microphone).
+    public static func findAudioDevices() -> [AVCaptureDevice] {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.externalUnknown, .builtInMicrophone],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        return discovery.devices
+    }
+
     /// Returns the first Elgato device, or falls back to any external capture device.
     public static func findElgato() -> AVCaptureDevice? {
         let devices = findCaptureDevices()
