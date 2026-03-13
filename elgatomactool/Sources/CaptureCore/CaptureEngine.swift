@@ -23,10 +23,9 @@ public final class CaptureEngine: NSObject {
     private(set) public var liveFPS: Double = 0
     private(set) public var droppedFrames: Int = 0
 
-    // Live bitrate tracking — wall-clock based, immune to timer jitter
+    // Live bitrate tracking — rolling 3s window for stable readout
     private var encodedBytesTotal: Int64 = 0
-    private var lastBitrateBytes: Int64 = 0
-    private var lastBitrateTime: CFAbsoluteTime = 0
+    private var bitrateSnapshots: [(time: CFAbsoluteTime, bytes: Int64)] = []
     private(set) public var liveBitrateMbps: Double = 0
 
     /// Called on the 1s timer to snapshot the frame/drop counters.
@@ -39,19 +38,21 @@ public final class CaptureEngine: NSObject {
         fpsLock.unlock()
     }
 
-    /// Compute live bitrate from wall-clock elapsed time and bytes encoded.
+    /// Compute live bitrate as a rolling average over ~3 seconds.
     public func sampleBitrate() {
         let now = CFAbsoluteTimeGetCurrent()
         fpsLock.lock()
         let totalBytes = encodedBytesTotal
         fpsLock.unlock()
 
-        let elapsed = now - lastBitrateTime
-        if elapsed > 0.1 {
-            let deltaBytes = totalBytes - lastBitrateBytes
-            liveBitrateMbps = Double(deltaBytes) * 8.0 / elapsed / 1_000_000.0
-            lastBitrateBytes = totalBytes
-            lastBitrateTime = now
+        bitrateSnapshots.append((now, totalBytes))
+        bitrateSnapshots.removeAll { now - $0.time > 3.0 }
+
+        if let first = bitrateSnapshots.first, bitrateSnapshots.count >= 2 {
+            let elapsed = now - first.time
+            if elapsed > 0.5 {
+                liveBitrateMbps = Double(totalBytes - first.bytes) * 8.0 / elapsed / 1_000_000.0
+            }
         }
     }
 
