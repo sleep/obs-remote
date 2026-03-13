@@ -376,9 +376,9 @@ struct ContentView: View {
     private var deviceSelector: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Video device row
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 Image(systemName: "video.fill")
-                    .frame(width: 16)
+                    .frame(width: 14)
                     .foregroundStyle(.secondary)
 
                 Picker("Device", selection: $vm.selectedDevice) {
@@ -397,7 +397,7 @@ struct ContentView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 260)
+                .frame(width: 250)
 
                 Button {
                     vm.refreshDevices()

@@ -33,9 +33,7 @@ struct WatermarkView: View {
     ]
 
     var body: some View {
-        GeometryReader { geo in
-            let size = geo.size
-
+        GeometryReader { _ in
             if let start = tracerStart {
                 // Active state: TimelineView drives per-frame ghost drawing
                 TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
