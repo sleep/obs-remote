@@ -110,6 +110,12 @@ final class CaptureViewModel: ObservableObject {
     private var settingsCancellables: Set<AnyCancellable> = []
     private var appNapActivity: NSObjectProtocol?
 
+    /// UniqueID of the device we were capturing from before a disconnect.
+    private var reconnectDeviceID: String?
+    /// Consecutive seconds with 0 FPS while supposedly capturing — triggers reconnect.
+    private var zeroFPSStreak: Int = 0
+    private static let zeroFPSReconnectThreshold = 3
+
     init(settings: AppSettings) {
         self.settings = settings
         self.replayDuration = settings.replayDuration
@@ -130,6 +136,21 @@ final class CaptureViewModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.engine.setOutputDirectory(settings.outputDirectory)
+            }
+            .store(in: &settingsCancellables)
+
+        // Watch for USB device connect/disconnect
+        NotificationCenter.default.publisher(for: .AVCaptureDeviceWasDisconnected)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                self?.handleDeviceDisconnected(notification)
+            }
+            .store(in: &settingsCancellables)
+
+        NotificationCenter.default.publisher(for: .AVCaptureDeviceWasConnected)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.handleDeviceConnected()
             }
             .store(in: &settingsCancellables)
 

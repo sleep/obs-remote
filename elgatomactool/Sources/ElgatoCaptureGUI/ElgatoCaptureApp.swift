@@ -9,8 +9,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var statusBarController = StatusBarController(viewModel: viewModel, settings: settings)
     private var didFinishSetup = false
 
+    private lazy var appIcon: NSImage = AppIconRenderer.makeIcon()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.applicationIconImage = AppIconRenderer.makeIcon()
         ensureSetup()
     }
 
@@ -30,6 +31,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.activate(ignoringOtherApps: true)
             }
         }
+
+        // Set icon after activation policy to prevent the dock tile reset from clearing it
+        NSApp.applicationIconImage = appIcon
 
         _ = statusBarController
         viewModel.autoConnectLastDevice()

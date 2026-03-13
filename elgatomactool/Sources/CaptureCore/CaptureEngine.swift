@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import CoreImage
 import ImageIO
+import Darwin
 
 /// Orchestrates the full capture pipeline: device -> preview + encoder -> replay buffer / recorder.
 public final class CaptureEngine: NSObject {
@@ -33,12 +34,18 @@ public final class CaptureEngine: NSObject {
     }
 
     public var onStateChange: (() -> Void)?
+    /// Called on every captured frame with the pixel buffer for display purposes.
+    public var onFrameForDisplay: ((CVPixelBuffer) -> Void)?
 
     private let captureQueue = DispatchQueue(label: "capture.output", qos: .userInteractive)
     private var device: AVCaptureDevice?
     private var isRunning = false
     private(set) public var isPreviewing = false
     private var recordingFormatDesc: CMFormatDescription?
+    private var captureActivity: NSObjectProtocol?
+    /// True once the first keyframe has been received after starting capture.
+    /// Frames before this are discarded to avoid green artifacts from incomplete GOPs.
+    private var receivedFirstKeyframe = false
 
     public init(replayDuration: Double = 30, bitrateMbps: Int = 20) {
         self.encoder = HardwareEncoder(bitrateMbps: bitrateMbps)
@@ -254,12 +261,28 @@ public final class CaptureEngine: NSObject {
 
         isPreviewing = false
         isRunning = true
+        receivedFirstKeyframe = false
+
+        // Prevent macOS from throttling this process when backgrounded.
+        // Without this, AVCaptureSession stops delivering frames to non-frontmost apps.
+        if captureActivity == nil {
+            captureActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+                reason: "Video capture pipeline active"
+            )
+        }
+
         print("[Capture] Pipeline running")
     }
 
     /// Stop the full capture pipeline. If the device is still available, falls back
     /// to preview-only mode so the user keeps seeing the video feed.
     public func stop() {
+        if let activity = captureActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            captureActivity = nil
+        }
+
         let wasDevice = device
         encoder.stop()
 
@@ -368,6 +391,13 @@ public final class CaptureEngine: NSObject {
     // MARK: - Private
 
     private func handleEncodedFrame(_ frame: EncodedFrame) {
+        // Wait for the first keyframe before buffering — frames before the first
+        // keyframe lack parameter sets and produce green/corrupt artifacts.
+        if !receivedFirstKeyframe {
+            guard frame.isKeyframe else { return }
+            receivedFirstKeyframe = true
+        }
+
         replayBuffer.append(frame)
 
         if recorder.isRecording {
@@ -472,6 +502,9 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
     public func captureOutput(_ output: AVCaptureOutput,
                               didOutput sampleBuffer: CMSampleBuffer,
                               from connection: AVCaptureConnection) {
+        // Keep thread at max priority — macOS downgrades background app QoS
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
+
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         fpsLock.lock()
@@ -481,6 +514,8 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         latestFrameLock.lock()
         latestPixelBuffer = pixelBuffer
         latestFrameLock.unlock()
+
+        onFrameForDisplay?(pixelBuffer)
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let duration = CMSampleBufferGetDuration(sampleBuffer)
