@@ -1,10 +1,12 @@
 import Foundation
 import Darwin
+import IOKit
 
 struct SystemSample {
     let cpu: Double       // 0–N% (can exceed 100 on multi-core)
     let ramMB: Double     // process resident memory in MB
     let diskFreeGB: Double // free disk space in GB
+    let gpu: Double       // 0–100% GPU utilization
 }
 
 final class SystemStatsMonitor {
@@ -17,10 +19,12 @@ final class SystemStatsMonitor {
     var latestCPU: Double { samples.last?.cpu ?? 0 }
     var latestRAM: Double { samples.last?.ramMB ?? 0 }
     var latestDisk: Double { samples.last?.diskFreeGB ?? 0 }
+    var latestGPU: Double { samples.last?.gpu ?? 0 }
 
     var cpuHistory: [Double] { samples.map(\.cpu) }
     var ramHistory: [Double] { samples.map(\.ramMB) }
     var diskHistory: [Double] { samples.map(\.diskFreeGB) }
+    var gpuHistory: [Double] { samples.map(\.gpu) }
 
     init() {
         // Prime the CPU baseline so the first real sample has a delta
@@ -41,8 +45,9 @@ final class SystemStatsMonitor {
 
         let ram = Self.residentMemoryMB()
         let disk = Self.diskFreeGB()
+        let gpu = Self.gpuUtilization()
 
-        let s = SystemSample(cpu: cpuPercent, ramMB: ram, diskFreeGB: disk)
+        let s = SystemSample(cpu: cpuPercent, ramMB: ram, diskFreeGB: disk, gpu: gpu)
         samples.append(s)
         if samples.count > maxSamples {
             samples.removeFirst(samples.count - maxSamples)
@@ -77,5 +82,46 @@ final class SystemStatsMonitor {
         guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: "/"),
               let free = attrs[.systemFreeSize] as? Int64 else { return 0 }
         return Double(free) / 1_073_741_824
+    }
+
+    private static func gpuUtilization() -> Double {
+        var iterator: io_iterator_t = 0
+        let result = IOServiceGetMatchingServices(
+            kIOMainPortDefault,
+            IOServiceMatching("IOAccelerator"),
+            &iterator
+        )
+        guard result == KERN_SUCCESS else { return 0 }
+        defer { IOObjectRelease(iterator) }
+
+        var entry: io_registry_entry_t = IOIteratorNext(iterator)
+        while entry != 0 {
+            defer { IOObjectRelease(entry) }
+            var props: Unmanaged<CFMutableDictionary>?
+            guard IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+                  let dict = props?.takeRetainedValue() as? [String: Any] else {
+                entry = IOIteratorNext(iterator)
+                continue
+            }
+
+            // Look for PerformanceStatistics or similar GPU stats dictionary
+            if let perfStats = dict["PerformanceStatistics"] as? [String: Any] {
+                // Try common keys for GPU utilization
+                if let util = perfStats["GPU Activity(%)"] as? Double {
+                    return util
+                }
+                if let util = perfStats["Device Utilization %"] as? Int {
+                    return Double(util)
+                }
+                // Apple Silicon: look for in-use ratio
+                if let inUse = perfStats["hardwareWaitTime"] as? Int64,
+                   let total = perfStats["totalWaitTime"] as? Int64, total > 0 {
+                    return Double(inUse) / Double(total) * 100
+                }
+            }
+
+            entry = IOIteratorNext(iterator)
+        }
+        return 0
     }
 }

@@ -3,6 +3,33 @@ import CaptureCore
 
 final class AppSettings: ObservableObject {
 
+    /// Available data fields for the menu bar status text.
+    enum StatusBarField: String, CaseIterable, Identifiable {
+        case device = "device"
+        case resolution = "resolution"
+        case fps = "fps"
+        case buffer = "buffer"
+        case bufferMB = "bufferMB"
+        case cpu = "cpu"
+        case gpu = "gpu"
+        case ram = "ram"
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .device: return "Device Name"
+            case .resolution: return "Resolution"
+            case .fps: return "FPS"
+            case .buffer: return "Buffer Duration"
+            case .bufferMB: return "Buffer Size (MB)"
+            case .cpu: return "CPU %"
+            case .gpu: return "GPU %"
+            case .ram: return "RAM Usage"
+            }
+        }
+    }
+
     private enum Keys {
         static let lastDeviceUniqueID = "lastDeviceUniqueID"
         static let rememberLastDevice = "rememberLastDevice"
@@ -12,6 +39,7 @@ final class AppSettings: ObservableObject {
         static let maxReplayRAM = "maxReplayRAM"
         static let bitrateMbps = "bitrateMbps"
         static let outputDirectoryPath = "outputDirectoryPath"
+        static let statusBarFields = "statusBarFields"
     }
 
     private let defaults = UserDefaults.standard
@@ -48,6 +76,11 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(outputDirectoryPath, forKey: Keys.outputDirectoryPath) }
     }
 
+    /// Which data fields to show as text in the menu bar next to the icon.
+    @Published var statusBarFields: Set<StatusBarField> {
+        didSet { defaults.set(statusBarFields.map(\.rawValue), forKey: Keys.statusBarFields) }
+    }
+
     var outputDirectory: URL {
         if let path = outputDirectoryPath, !path.isEmpty {
             return URL(fileURLWithPath: path)
@@ -64,5 +97,11 @@ final class AppSettings: ObservableObject {
         self.maxReplayRAM = defaults.object(forKey: Keys.maxReplayRAM) as? Int ?? 0
         self.bitrateMbps = defaults.object(forKey: Keys.bitrateMbps) as? Int ?? 20
         self.outputDirectoryPath = defaults.string(forKey: Keys.outputDirectoryPath)
+
+        if let saved = defaults.stringArray(forKey: Keys.statusBarFields) {
+            self.statusBarFields = Set(saved.compactMap { StatusBarField(rawValue: $0) })
+        } else {
+            self.statusBarFields = []
+        }
     }
 }

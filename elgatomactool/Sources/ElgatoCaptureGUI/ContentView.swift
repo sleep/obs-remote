@@ -134,6 +134,13 @@ struct ContentView: View {
                                     color: .green
                                 )
                                 StatWithSparkline(
+                                    label: "GPU",
+                                    value: String(format: "%.0f%%", vm.gpuPercent),
+                                    data: vm.gpuHistory,
+                                    color: .purple,
+                                    fixedMin: 0
+                                )
+                                StatWithSparkline(
                                     label: "DSK",
                                     value: String(format: "%.0fG", vm.diskFreeGB),
                                     data: vm.diskHistory,
@@ -360,6 +367,7 @@ struct ContentView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
+                        .contentShape(Rectangle())
                         .background(
                             isSelected ? Color.accentColor.opacity(0.2) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 5)

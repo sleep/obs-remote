@@ -38,9 +38,11 @@ final class CaptureViewModel: ObservableObject {
     @Published var cpuPercent: Double = 0
     @Published var ramMB: Double = 0
     @Published var diskFreeGB: Double = 0
+    @Published var gpuPercent: Double = 0
     @Published var cpuHistory: [Double] = []
     @Published var ramHistory: [Double] = []
     @Published var diskHistory: [Double] = []
+    @Published var gpuHistory: [Double] = []
 
     // Settings — synced from AppSettings
     @Published var replayDuration: Double = 30 {
@@ -106,6 +108,7 @@ final class CaptureViewModel: ObservableObject {
     let systemStats = SystemStatsMonitor()
     private var statusTimer: Timer?
     private var settingsCancellables: Set<AnyCancellable> = []
+    private var appNapActivity: NSObjectProtocol?
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -332,22 +335,37 @@ final class CaptureViewModel: ObservableObject {
         cpuPercent = systemStats.latestCPU
         ramMB = systemStats.latestRAM
         diskFreeGB = systemStats.latestDisk
+        gpuPercent = systemStats.latestGPU
         cpuHistory = systemStats.cpuHistory
         ramHistory = systemStats.ramHistory
         diskHistory = systemStats.diskHistory
+        gpuHistory = systemStats.gpuHistory
     }
 
     private func startStatusTimer() {
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.syncState()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        statusTimer = timer
+
+        // Prevent App Nap from throttling the capture pipeline
+        appNapActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical],
+            reason: "Capture pipeline active"
+        )
     }
 
     private func stopStatusTimer() {
         statusTimer?.invalidate()
         statusTimer = nil
+
+        if let activity = appNapActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            appNapActivity = nil
+        }
     }
 
     private func clearStatusAfterDelay() {

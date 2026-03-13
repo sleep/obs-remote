@@ -6,9 +6,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     let settings = AppSettings()
     private(set) lazy var viewModel = CaptureViewModel(settings: settings)
-    private var statusBarController: StatusBarController?
+    private(set) lazy var statusBarController = StatusBarController(viewModel: viewModel, settings: settings)
+    private var didFinishSetup = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.applicationIconImage = AppIconRenderer.makeIcon()
+        ensureSetup()
+    }
+
+    /// Called from both applicationDidFinishLaunching and the SwiftUI body
+    /// to guarantee the status bar is created regardless of lifecycle timing.
+    func ensureSetup() {
+        guard !didFinishSetup else { return }
+        didFinishSetup = true
+
         if settings.startMinimized {
             NSApp.setActivationPolicy(.accessory)
         } else {
@@ -20,7 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        statusBarController = StatusBarController(viewModel: viewModel, settings: settings)
+        _ = statusBarController
         viewModel.autoConnectLastDevice()
     }
 
@@ -40,6 +51,7 @@ struct ElgatoCaptureApp: App {
             ContentView()
                 .environmentObject(appDelegate.viewModel)
                 .environmentObject(appDelegate.settings)
+                .onAppear { appDelegate.ensureSetup() }
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 960, height: 620)

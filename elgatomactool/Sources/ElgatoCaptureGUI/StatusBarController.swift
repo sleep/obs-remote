@@ -9,53 +9,131 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let viewModel: CaptureViewModel
     private let settings: AppSettings
     private var cancellables: Set<AnyCancellable> = []
+    private var updateTimer: Timer?
 
     init(viewModel: CaptureViewModel, settings: AppSettings) {
         self.viewModel = viewModel
         self.settings = settings
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Elgato Capture")
-            button.image?.isTemplate = false
-            updateIcon()
-        }
+        updateStatusBar()
 
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
 
-        // Observe state changes to update icon
+        // Update icon on state changes
         viewModel.$isCapturing
             .combineLatest(viewModel.$isRecording)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _ in self?.updateIcon() }
+            .sink { [weak self] _, _ in self?.updateStatusBar() }
             .store(in: &cancellables)
+
+        // Update when settings change which fields to show
+        settings.$statusBarFields
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusBar() }
+            .store(in: &cancellables)
+
+        // Periodic update for live data (FPS, buffer, CPU, etc.)
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateStatusBar() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        updateTimer = timer
+
+        print("[StatusBar] Created status bar item")
     }
 
-    private func updateIcon() {
+    deinit {
+        updateTimer?.invalidate()
+    }
+
+    // MARK: - Status bar rendering
+
+    private func updateStatusBar() {
         guard let button = statusItem.button else { return }
 
-        let symbolName: String
-        let tintColor: NSColor
-
+        let color: NSColor
         if viewModel.isRecording {
-            symbolName = "circle.fill"
-            tintColor = .systemRed
+            color = .systemRed
         } else if viewModel.isCapturing {
-            symbolName = "circle.fill"
-            tintColor = .systemGreen
+            color = .systemGreen
         } else {
-            symbolName = "circle.fill"
-            tintColor = .systemGray
+            color = .systemGray
         }
 
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-            let configured = image.withSymbolConfiguration(config) ?? image
-            button.image = configured
-            button.contentTintColor = tintColor
+        // Build the text portion from enabled fields
+        let text = buildStatusText()
+
+        // Draw icon + text as attributed string
+        let circleSize: CGFloat = 10
+        let imageSize = NSSize(width: circleSize + 4, height: 18)
+        let circleImage = NSImage(size: imageSize, flipped: false) { _ in
+            let circleRect = NSRect(x: 2, y: 4, width: circleSize, height: circleSize)
+            color.setFill()
+            NSBezierPath(ovalIn: circleRect).fill()
+            return true
+        }
+        circleImage.isTemplate = false
+
+        if text.isEmpty {
+            button.image = circleImage
+            button.title = ""
+            button.imagePosition = .imageOnly
+        } else {
+            button.image = circleImage
+            button.title = " " + text
+            button.imagePosition = .imageLeading
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        }
+    }
+
+    private func buildStatusText() -> String {
+        let fields = settings.statusBarFields
+        guard !fields.isEmpty else { return "" }
+
+        // Ordered consistently by the enum's allCases order
+        var parts: [String] = []
+        for field in AppSettings.StatusBarField.allCases {
+            guard fields.contains(field) else { continue }
+            if let value = valueForField(field) {
+                parts.append(value)
+            }
+        }
+        return parts.joined(separator: "  ")
+    }
+
+    private func valueForField(_ field: AppSettings.StatusBarField) -> String? {
+        switch field {
+        case .device:
+            return viewModel.selectedDevice?.localizedName
+        case .resolution:
+            let r = viewModel.captureResolution
+            return r.isEmpty ? nil : r
+        case .fps:
+            guard viewModel.isCapturing else { return nil }
+            return String(format: "%.0ffps", viewModel.liveFPS)
+        case .buffer:
+            guard viewModel.isCapturing else { return nil }
+            return String(format: "%.0fs/\(formatDuration(viewModel.replayDuration))", viewModel.bufferDuration)
+        case .bufferMB:
+            guard viewModel.isCapturing else { return nil }
+            return "\(viewModel.bufferSizeMB)MB"
+        case .cpu:
+            guard viewModel.isCapturing else { return nil }
+            return String(format: "CPU %.0f%%", viewModel.cpuPercent)
+        case .gpu:
+            guard viewModel.isCapturing else { return nil }
+            return String(format: "GPU %.0f%%", viewModel.gpuPercent)
+        case .ram:
+            guard viewModel.isCapturing else { return nil }
+            let mb = viewModel.ramMB
+            if mb >= 1024 {
+                return String(format: "RAM %.1fG", mb / 1024)
+            }
+            return String(format: "RAM %.0fM", mb)
         }
     }
 
@@ -77,9 +155,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         } else {
             statusText = "Not capturing"
         }
-        let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-        statusItem.isEnabled = false
-        menu.addItem(statusItem)
+        let infoItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        infoItem.isEnabled = false
+        menu.addItem(infoItem)
 
         menu.addItem(.separator())
 
@@ -90,7 +168,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             recItem.target = self
             menu.addItem(recItem)
 
-            // Screenshot
             let ssItem = NSMenuItem(title: "Take Screenshot", action: #selector(takeScreenshot), keyEquivalent: "s")
             ssItem.target = self
             menu.addItem(ssItem)
@@ -128,14 +205,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         windowItem.target = self
         menu.addItem(windowItem)
 
-        // Preferences
         let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(showPreferences), keyEquivalent: ",")
         prefsItem.target = self
         menu.addItem(prefsItem)
 
         menu.addItem(.separator())
 
-        // Quit
         let quitItem = NSMenuItem(title: "Quit Elgato Capture", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -180,7 +255,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             } else {
                 NSApp.activate(ignoringOtherApps: true)
             }
-            // Open a new window if none exist
             if let window = NSApp.windows.first(where: { $0.title != "" }) {
                 window.makeKeyAndOrderFront(nil)
             }
@@ -188,7 +262,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showPreferences() {
-        // Bring the app to front and show the main window — settings is a sheet on it
         NSApp.setActivationPolicy(.regular)
         if #available(macOS 14.0, *) {
             NSApp.activate()

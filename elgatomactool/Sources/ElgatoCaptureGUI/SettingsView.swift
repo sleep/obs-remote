@@ -48,6 +48,24 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            // Status Bar
+            GroupBox("Menu Bar Display") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Show next to the status icon:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    let columns = [GridItem(.flexible()), GridItem(.flexible())]
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                        ForEach(AppSettings.StatusBarField.allCases) { field in
+                            Toggle(field.label, isOn: statusBarBinding(for: field))
+                                .toggleStyle(.checkbox)
+                        }
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // Capture
             GroupBox("Capture") {
                 VStack(alignment: .leading, spacing: 10) {
