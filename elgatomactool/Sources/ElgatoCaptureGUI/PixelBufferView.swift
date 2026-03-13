@@ -8,6 +8,10 @@ import CaptureCore
 /// This avoids macOS throttling AVCaptureSession when an AVCaptureVideoPreviewLayer is occluded.
 final class PixelBufferNSView: NSView {
 
+    /// Number of frames received — used to skip the first few potentially-corrupt frames.
+    private var frameCount = 0
+    private static let framesToSkip = 3
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -23,8 +27,17 @@ final class PixelBufferNSView: NSView {
     }
 
     func display(_ pixelBuffer: CVPixelBuffer) {
+        // Skip the first few frames to avoid green artifacts from incomplete GOPs
+        frameCount += 1
+        guard frameCount > Self.framesToSkip else { return }
+
         guard let surface = CVPixelBufferGetIOSurface(pixelBuffer) else { return }
         layer?.contents = surface.takeUnretainedValue()
+    }
+
+    func resetFrameCount() {
+        frameCount = 0
+        layer?.contents = nil
     }
 }
 
@@ -54,6 +67,7 @@ struct PixelBufferDisplayView: NSViewRepresentable {
         func startObserving(engine: CaptureEngine) {
             guard engine !== currentEngine else { return }
             currentEngine = engine
+            view?.resetFrameCount()
             engine.onFrameForDisplay = { [weak self] pixelBuffer in
                 DispatchQueue.main.async {
                     self?.view?.display(pixelBuffer)

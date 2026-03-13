@@ -33,6 +33,32 @@ public final class CaptureEngine: NSObject {
         fpsLock.unlock()
     }
 
+    // MARK: - Audio metering
+
+    private let audioQueue = DispatchQueue(label: "capture.audio", qos: .userInteractive)
+    private var audioOutput: AVCaptureAudioDataOutput?
+    private var audioDeviceInput: AVCaptureDeviceInput?
+    private let audioLock = NSLock()
+    private var currentRMS: Float = 0
+    private var currentPeak: Float = 0
+    private var maxRMSSinceLastSample: Float = 0
+    private var maxPeakSinceLastSample: Float = 0
+
+    /// Whether the capture session has an active audio input.
+    private(set) public var hasAudioInput = false
+
+    /// Snapshot the audio levels accumulated since the last call and reset the accumulators.
+    /// Returns levels in linear scale (0.0 … 1.0).
+    public func sampleAudioLevels() -> (rms: Float, peak: Float) {
+        audioLock.lock()
+        let rms = maxRMSSinceLastSample
+        let peak = maxPeakSinceLastSample
+        maxRMSSinceLastSample = 0
+        maxPeakSinceLastSample = 0
+        audioLock.unlock()
+        return (rms, peak)
+    }
+
     public var onStateChange: (() -> Void)?
     /// Called on every captured frame with the pixel buffer for display purposes.
     public var onFrameForDisplay: ((CVPixelBuffer) -> Void)?
@@ -128,6 +154,86 @@ public final class CaptureEngine: NSObject {
         }
     }
 
+    // MARK: - Audio setup
+
+    /// Try to add audio capture to the current session. Call within beginConfiguration/commitConfiguration.
+    private func addAudioOutput(for videoDevice: AVCaptureDevice) {
+        let output = AVCaptureAudioDataOutput()
+        output.setSampleBufferDelegate(self, queue: audioQueue)
+
+        // First check if the existing device input already provides audio
+        if captureSession.canAddOutput(output) {
+            captureSession.addOutput(output)
+            audioOutput = output
+            hasAudioInput = true
+            print("[Capture] Audio available from device input")
+            return
+        }
+
+        // Otherwise, look for a separate audio device with the same name
+        guard let audioDevice = findMatchingAudioDevice(for: videoDevice) else {
+            print("[Capture] No audio input available for \(videoDevice.localizedName)")
+            return
+        }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: audioDevice)
+            if captureSession.canAddInput(input) {
+                captureSession.addInput(input)
+                audioDeviceInput = input
+                if captureSession.canAddOutput(output) {
+                    captureSession.addOutput(output)
+                    audioOutput = output
+                    hasAudioInput = true
+                    print("[Capture] Audio from separate device: \(audioDevice.localizedName)")
+                }
+            }
+        } catch {
+            print("[Capture] Could not add audio input: \(error)")
+        }
+    }
+
+    /// Remove audio output and any separate audio device input from the session.
+    private func removeAudioOutput() {
+        if let output = audioOutput {
+            captureSession.removeOutput(output)
+            audioOutput = nil
+        }
+        if let input = audioDeviceInput {
+            captureSession.removeInput(input)
+            audioDeviceInput = nil
+        }
+        hasAudioInput = false
+        audioLock.lock()
+        currentRMS = 0
+        currentPeak = 0
+        maxRMSSinceLastSample = 0
+        maxPeakSinceLastSample = 0
+        audioLock.unlock()
+    }
+
+    /// Find an audio device whose name matches the given video device.
+    private func findMatchingAudioDevice(for videoDevice: AVCaptureDevice) -> AVCaptureDevice? {
+        let audioDevices = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInMicrophone, .externalUnknown],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
+
+        let videoName = videoDevice.localizedName.lowercased()
+
+        // Exact match first
+        if let match = audioDevices.first(where: { $0.localizedName == videoDevice.localizedName }) {
+            return match
+        }
+
+        // Partial match
+        return audioDevices.first(where: {
+            let audioName = $0.localizedName.lowercased()
+            return audioName.contains(videoName) || videoName.contains(audioName)
+        })
+    }
+
     // MARK: - Preview (lightweight, no encoder)
 
     /// Start a preview-only session: adds device input and runs the session so
@@ -164,6 +270,9 @@ public final class CaptureEngine: NSObject {
             throw CaptureError.captureSessionFailed("Cannot add device input")
         }
         captureSession.addInput(input)
+
+        addAudioOutput(for: device)
+
         captureSession.commitConfiguration()
 
         captureSession.startRunning()
@@ -176,6 +285,7 @@ public final class CaptureEngine: NSObject {
         guard isPreviewing, !isRunning else { return }
         captureSession.stopRunning()
         captureSession.beginConfiguration()
+        removeAudioOutput()
         for input in captureSession.inputs { captureSession.removeInput(input) }
         captureSession.commitConfiguration()
         isPreviewing = false
@@ -233,6 +343,9 @@ public final class CaptureEngine: NSObject {
                 throw CaptureError.captureSessionFailed("Cannot add video output")
             }
             captureSession.addOutput(output)
+
+            addAudioOutput(for: device)
+
             captureSession.commitConfiguration()
 
             encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
@@ -247,7 +360,10 @@ public final class CaptureEngine: NSObject {
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
 
             captureSession.beginConfiguration()
-            for output in captureSession.outputs { captureSession.removeOutput(output) }
+            // Remove only non-audio outputs; keep audio if already set up from preview
+            for output in captureSession.outputs where !(output is AVCaptureAudioDataOutput) {
+                captureSession.removeOutput(output)
+            }
 
             let output = AVCaptureVideoDataOutput()
             output.alwaysDiscardsLateVideoFrames = true
@@ -257,6 +373,12 @@ public final class CaptureEngine: NSObject {
                 throw CaptureError.captureSessionFailed("Cannot add video output")
             }
             captureSession.addOutput(output)
+
+            // Add audio if not already present from preview
+            if audioOutput == nil {
+                addAudioOutput(for: device)
+            }
+
             captureSession.commitConfiguration()
 
             encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
@@ -290,9 +412,11 @@ public final class CaptureEngine: NSObject {
         let wasDevice = device
         encoder.stop()
 
-        // Remove video data output but keep the input for preview
+        // Remove video data output but keep inputs + audio output for preview
         captureSession.beginConfiguration()
-        for output in captureSession.outputs { captureSession.removeOutput(output) }
+        for output in captureSession.outputs where !(output is AVCaptureAudioDataOutput) {
+            captureSession.removeOutput(output)
+        }
         captureSession.commitConfiguration()
 
         isRunning = false
@@ -499,14 +623,20 @@ public final class CaptureEngine: NSObject {
     }
 }
 
-// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate + Audio
 
-extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
+extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
 
     public func captureOutput(_ output: AVCaptureOutput,
                               didOutput sampleBuffer: CMSampleBuffer,
                               from connection: AVCaptureConnection) {
-        // Keep thread at max priority — macOS downgrades background app QoS
+        // Audio path
+        if output is AVCaptureAudioDataOutput {
+            processAudioSampleBuffer(sampleBuffer)
+            return
+        }
+
+        // Video path — keep thread at max priority
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -535,5 +665,39 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         fpsLock.lock()
         dropCount += 1
         fpsLock.unlock()
+    }
+
+    private func processAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+
+        var length = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+            totalLengthOut: &length, dataPointerOut: &dataPointer
+        )
+        guard status == noErr, let ptr = dataPointer, length > 0 else { return }
+
+        let sampleCount = length / MemoryLayout<Float32>.size
+        guard sampleCount > 0 else { return }
+
+        let floatPtr = UnsafeRawPointer(ptr).assumingMemoryBound(to: Float32.self)
+
+        var sumSquares: Float = 0
+        var peak: Float = 0
+        for i in 0..<sampleCount {
+            let s = abs(floatPtr[i])
+            sumSquares += s * s
+            if s > peak { peak = s }
+        }
+
+        let rms = sqrt(sumSquares / Float(sampleCount))
+
+        audioLock.lock()
+        currentRMS = rms
+        currentPeak = peak
+        if rms > maxRMSSinceLastSample { maxRMSSinceLastSample = rms }
+        if peak > maxPeakSinceLastSample { maxPeakSinceLastSample = peak }
+        audioLock.unlock()
     }
 }

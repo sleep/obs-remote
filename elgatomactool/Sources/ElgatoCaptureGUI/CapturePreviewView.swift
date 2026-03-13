@@ -42,6 +42,7 @@ final class PreviewNSView: NSView {
 
     private func setupPreviewLayer() {
         previewLayer?.removeFromSuperlayer()
+        revealTimer?.invalidate()
 
         guard let session else { return }
 
@@ -49,9 +50,20 @@ final class PreviewNSView: NSView {
         preview.videoGravity = .resizeAspect
         preview.frame = bounds
         preview.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        // Start hidden to avoid showing the green artifact from the first corrupt frame
+        preview.opacity = 0
         layer?.addSublayer(preview)
         self.previewLayer = preview
+
+        // Reveal after a short delay so the device has time to produce clean frames
+        revealTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.previewLayer?.opacity = 1
+            }
+        }
     }
+
+    private var revealTimer: Timer?
 
     override func layout() {
         super.layout()

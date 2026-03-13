@@ -38,6 +38,12 @@ final class CaptureViewModel: ObservableObject {
     @Published var droppedFrames: Int = 0
     @Published var fpsHistory: [Double] = []
 
+    // Audio levels (linear 0–1)
+    @Published var audioLevel: Double = 0
+    @Published var audioPeakLevel: Double = 0
+    @Published var audioHistory: [Double] = []
+    @Published var hasAudio: Bool = false
+
     // System stats
     @Published var cpuPercent: Double = 0
     @Published var ramMB: Double = 0
@@ -246,6 +252,7 @@ final class CaptureViewModel: ObservableObject {
         do {
             try engine.startPreview(with: device)
             isPreviewing = true
+            hasAudio = engine.hasAudioInput
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             captureResolution = "\(dims.width)x\(dims.height)"
         } catch {
@@ -306,6 +313,9 @@ final class CaptureViewModel: ObservableObject {
         liveFPS = 0
         droppedFrames = 0
         fpsHistory = []
+        audioLevel = 0
+        audioPeakLevel = 0
+        audioHistory = []
         syncState()
 
         // Update resolution from the still-connected device
@@ -360,6 +370,18 @@ final class CaptureViewModel: ObservableObject {
         droppedFrames = engine.droppedFrames
         fpsHistory.append(liveFPS)
         if fpsHistory.count > 60 { fpsHistory.removeFirst(fpsHistory.count - 60) }
+
+        // Audio levels
+        hasAudio = engine.hasAudioInput
+        if hasAudio {
+            let levels = engine.sampleAudioLevels()
+            audioLevel = Double(levels.rms)
+            audioPeakLevel = Double(levels.peak)
+            // Store peak in dB for the history graph (clamped to -60…0)
+            let peakDB = levels.peak > 0 ? max(20 * log10(levels.peak), -60) : -60
+            audioHistory.append(Double(peakDB))
+            if audioHistory.count > 120 { audioHistory.removeFirst(audioHistory.count - 120) }
+        }
 
         checkForStall()
 
@@ -439,22 +461,14 @@ final class CaptureViewModel: ObservableObject {
         if let targetID = reconnectDeviceID {
             availableDevices = DeviceDiscovery.findCaptureDevices()
             if availableDevices.contains(where: { $0.uniqueID == targetID }) {
-                attemptReconnect(deviceID: targetID, retries: 5, delay: 1.0)
+                attemptReconnect(deviceID: targetID, delay: 0.3)
             }
         } else {
             refreshDevices()
         }
     }
 
-    private func attemptReconnect(deviceID: String, retries: Int, delay: Double) {
-        guard retries > 0 else {
-            isReconnecting = false
-            reconnectDeviceID = nil
-            statusMessage = "Reconnect failed"
-            errorMessage = "Could not reconnect to device after multiple attempts."
-            return
-        }
-
+    private func attemptReconnect(deviceID: String, delay: Double) {
         isReconnecting = true
         statusMessage = "Reconnecting..."
 
@@ -469,8 +483,8 @@ final class CaptureViewModel: ObservableObject {
             // Refresh the device object (may have changed across unplug/replug)
             self.availableDevices = DeviceDiscovery.findCaptureDevices()
             guard let fresh = self.availableDevices.first(where: { $0.uniqueID == deviceID }) else {
-                print("[GUI] Device not available yet, retrying (\(retries - 1) left)")
-                self.attemptReconnect(deviceID: deviceID, retries: retries - 1, delay: delay)
+                // Device not found yet — retry forever with short delay
+                self.attemptReconnect(deviceID: deviceID, delay: 0.5)
                 return
             }
             self.selectedDevice = fresh
@@ -488,8 +502,8 @@ final class CaptureViewModel: ObservableObject {
                 self.startStatusTimer()
                 print("[GUI] Reconnected successfully")
             } catch {
-                print("[GUI] Reconnect attempt failed (\(retries - 1) left): \(error)")
-                self.attemptReconnect(deviceID: deviceID, retries: retries - 1, delay: delay)
+                print("[GUI] Reconnect attempt failed: \(error) — retrying")
+                self.attemptReconnect(deviceID: deviceID, delay: 0.5)
             }
         }
     }

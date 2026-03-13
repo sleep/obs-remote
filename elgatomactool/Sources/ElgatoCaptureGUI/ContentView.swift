@@ -209,6 +209,23 @@ struct ContentView: View {
     private var statsOverlay: some View {
         VStack {
             Spacer()
+
+            // Audio graph (above the bottom stats bar)
+            if vm.hasAudio {
+                HStack {
+                    Spacer()
+                    AudioGraphView(
+                        level: vm.audioLevel,
+                        peak: vm.audioPeakLevel,
+                        history: vm.audioHistory
+                    )
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(.horizontal, 8)
+                }
+            }
+
             HStack(alignment: .bottom) {
                 HStack(spacing: 10) {
                     if !vm.captureResolution.isEmpty {
