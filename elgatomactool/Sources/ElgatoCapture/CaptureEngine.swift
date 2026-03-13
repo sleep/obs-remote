@@ -59,7 +59,8 @@ final class CaptureEngine: NSObject {
 
         // Build capture session
         captureSession.beginConfiguration()
-        captureSession.sessionPreset = .inputPriority  // Use the device's native format
+        // Don't set a session preset — we configure activeFormat directly on the device,
+        // which takes priority over any preset.
 
         let input = try AVCaptureDeviceInput(device: device)
         guard captureSession.canAddInput(input) else {
