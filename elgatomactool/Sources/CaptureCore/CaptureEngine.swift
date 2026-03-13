@@ -57,26 +57,35 @@ public final class CaptureEngine: NSObject {
         self.device = device
         print("[Capture] Using device: \(device.localizedName)")
 
-        guard let (format, _) = DeviceDiscovery.best1080p60Format(for: device) else {
-            // Print what formats ARE available for debugging
-            print("[Capture] Available formats for \(device.localizedName):")
-            for format in device.formats {
-                let desc = format.formatDescription
-                let dims = CMVideoFormatDescriptionGetDimensions(desc)
-                let maxFPS = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
-                print("  \(dims.width)x\(dims.height) @ \(Int(maxFPS))fps")
-            }
+        // Try to find a good format, or fall back to the device's current active format
+        let format: AVCaptureDevice.Format
+        let targetFPS: Double
+
+        if let (bestFormat, bestRange) = DeviceDiscovery.bestFormat(for: device) {
+            format = bestFormat
+            targetFPS = min(bestRange.maxFrameRate, 60)
+        } else if !device.formats.isEmpty {
+            // Fall back to whatever the device currently has active
+            format = device.activeFormat
+            targetFPS = device.activeFormat.videoSupportedFrameRateRanges
+                .map(\.maxFrameRate).max() ?? 30
+            print("[Capture] Using device's active format as fallback")
+        } else {
+            print("[Capture] No formats available. All formats for \(device.localizedName):")
+            DeviceDiscovery.printDevices()
             throw CaptureError.noSupportedFormat
         }
 
+        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let timescale = CMTimeScale(targetFPS)
+
         try device.lockForConfiguration()
         device.activeFormat = format
-        device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
-        device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 60)
+        device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: timescale)
+        device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: timescale)
         device.unlockForConfiguration()
 
-        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-        print("[Capture] Format: \(dims.width)x\(dims.height) @ 60fps")
+        print("[Capture] Format: \(dims.width)x\(dims.height) @ \(Int(targetFPS))fps")
 
         captureSession.beginConfiguration()
 
@@ -92,9 +101,8 @@ public final class CaptureEngine: NSObject {
         captureSession.addInput(input)
 
         let output = AVCaptureVideoDataOutput()
-        output.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        ]
+        // Let AVFoundation pick the best pixel format for this device
+        // instead of forcing NV12 which some devices don't support
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: captureQueue)
 
@@ -106,6 +114,8 @@ public final class CaptureEngine: NSObject {
 
         captureSession.commitConfiguration()
 
+        // Start encoder with actual dimensions
+        encoder.updateDimensions(width: dims.width, height: dims.height, fps: Int(targetFPS))
         try encoder.start()
 
         captureSession.startRunning()

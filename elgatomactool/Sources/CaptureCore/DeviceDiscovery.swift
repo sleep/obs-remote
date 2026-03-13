@@ -2,10 +2,12 @@ import AVFoundation
 
 public enum DeviceDiscovery {
 
-    /// Returns all external video capture devices.
+    /// Returns all video capture devices (external + built-in, so virtual cameras like OBS also appear).
     public static func findCaptureDevices() -> [AVCaptureDevice] {
+        // Search all device types — Cam Link 4K can appear as .externalUnknown
+        // or sometimes as other types depending on macOS version and drivers
         let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.externalUnknown],
+            deviceTypes: [.externalUnknown, .builtInWideAngleCamera],
             mediaType: .video,
             position: .unspecified
         )
@@ -27,33 +29,49 @@ public enum DeviceDiscovery {
         return devices.first
     }
 
-    /// Lists all discovered capture devices to stdout.
+    /// Prints ALL formats for all devices (for debugging).
     public static func printDevices() {
         let devices = findCaptureDevices()
         if devices.isEmpty {
-            print("No external capture devices found.")
-            print("Make sure your Elgato is plugged in and recognized by macOS.")
+            print("No capture devices found.")
             return
         }
         print("Found \(devices.count) capture device(s):")
         for (i, device) in devices.enumerated() {
             print("  [\(i)] \(device.localizedName) (\(device.uniqueID))")
+            print("       Active format: \(formatString(device.activeFormat))")
+            print("       All formats:")
             for format in device.formats {
-                let desc = format.formatDescription
-                let dims = CMVideoFormatDescriptionGetDimensions(desc)
-                let ranges = format.videoSupportedFrameRateRanges
-                let maxFPS = ranges.map(\.maxFrameRate).max() ?? 0
-                if dims.width == 1920 && dims.height == 1080 && maxFPS >= 59.0 {
-                    let mediaSubType = CMFormatDescriptionGetMediaSubType(desc)
-                    let fourCC = String(describing: mediaSubType)
-                    print("    \(dims.width)x\(dims.height) @ \(Int(maxFPS))fps [\(fourCC)]")
-                }
+                print("         \(formatString(format))")
             }
         }
     }
 
-    /// Finds the best 1080p60 format for a device. Prefers NV12 for hardware pipeline efficiency.
-    public static func best1080p60Format(for device: AVCaptureDevice) -> (AVCaptureDevice.Format, AVFrameRateRange)? {
+    private static func formatString(_ format: AVCaptureDevice.Format) -> String {
+        let desc = format.formatDescription
+        let dims = CMVideoFormatDescriptionGetDimensions(desc)
+        let subType = CMFormatDescriptionGetMediaSubType(desc)
+        let ranges = format.videoSupportedFrameRateRanges
+        let fpsStr = ranges.map { "\(Int($0.minFrameRate))-\(Int($0.maxFrameRate))fps" }.joined(separator: ", ")
+        let fourCC = fourCCString(subType)
+        return "\(dims.width)x\(dims.height) [\(fourCC)] \(fpsStr)"
+    }
+
+    private static func fourCCString(_ code: FourCharCode) -> String {
+        let bytes: [UInt8] = [
+            UInt8((code >> 24) & 0xFF),
+            UInt8((code >> 16) & 0xFF),
+            UInt8((code >> 8) & 0xFF),
+            UInt8(code & 0xFF),
+        ]
+        if let s = String(bytes: bytes, encoding: .ascii) { return s }
+        return String(code)
+    }
+
+    /// Finds the best format for a device. Prefers 1080p60 NV12, but falls back to
+    /// any usable format if 1080p60 isn't available.
+    public static func bestFormat(for device: AVCaptureDevice) -> (AVCaptureDevice.Format, AVFrameRateRange)? {
+        // Score each format: prefer 1080p, then high fps, then NV12 pixel format
         var bestFormat: AVCaptureDevice.Format?
         var bestRange: AVFrameRateRange?
         var bestScore = -1
@@ -61,14 +79,26 @@ public enum DeviceDiscovery {
         for format in device.formats {
             let desc = format.formatDescription
             let dims = CMVideoFormatDescriptionGetDimensions(desc)
-            guard dims.width == 1920, dims.height == 1080 else { continue }
+            let subType = CMFormatDescriptionGetMediaSubType(desc)
 
-            for range in format.videoSupportedFrameRateRanges where range.maxFrameRate >= 59.0 {
-                let subType = CMFormatDescriptionGetMediaSubType(desc)
+            for range in format.videoSupportedFrameRateRanges {
                 var score = 0
-                if subType == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange { score = 3 }
-                else if subType == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange { score = 2 }
-                else if subType == kCVPixelFormatType_32BGRA { score = 1 }
+
+                // Resolution scoring (strongly prefer 1080p)
+                if dims.width == 1920 && dims.height == 1080 { score += 10000 }
+                else if dims.width >= 1280 { score += 5000 }
+                else { score += Int(dims.width) }
+
+                // FPS scoring (prefer 60, accept 30+)
+                if range.maxFrameRate >= 59.0 { score += 1000 }
+                else if range.maxFrameRate >= 29.0 { score += 500 }
+                else { score += Int(range.maxFrameRate) }
+
+                // Pixel format scoring (prefer NV12 for hardware encoder)
+                if subType == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange { score += 30 }
+                else if subType == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange { score += 20 }
+                else if subType == kCVPixelFormatType_32BGRA { score += 10 }
+                else { score += 1 }  // Accept any format
 
                 if score > bestScore {
                     bestScore = score
@@ -82,5 +112,10 @@ public enum DeviceDiscovery {
             return (format, range)
         }
         return nil
+    }
+
+    /// Legacy: strict 1080p60 lookup.
+    public static func best1080p60Format(for device: AVCaptureDevice) -> (AVCaptureDevice.Format, AVFrameRateRange)? {
+        return bestFormat(for: device)
     }
 }

@@ -16,10 +16,11 @@ public struct EncodedFrame {
 public final class HardwareEncoder {
 
     private var session: VTCompressionSession?
-    private let width: Int32
-    private let height: Int32
-    private let fps: Int
-    private let bitrate: Int
+    private var width: Int32
+    private var height: Int32
+    private var fps: Int
+    private let bitrateMbps: Int
+    private var bitrate: Int
 
     public var onEncodedFrame: ((EncodedFrame) -> Void)?
 
@@ -29,14 +30,21 @@ public final class HardwareEncoder {
         self.width = width
         self.height = height
         self.fps = fps
+        self.bitrateMbps = bitrateMbps
+        self.bitrate = bitrateMbps * 1_000_000
+    }
+
+    /// Update dimensions before calling start(). Used when the actual device format differs from defaults.
+    public func updateDimensions(width: Int32, height: Int32, fps: Int) {
+        self.width = width
+        self.height = height
+        self.fps = fps
         self.bitrate = bitrateMbps * 1_000_000
     }
 
     public func start() throws {
-        let encoderSpec: [CFString: Any] = [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
-            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
-        ]
+        // Stop existing session if any
+        if let session { VTCompressionSessionInvalidate(session); self.session = nil }
 
         var sessionOut: VTCompressionSession?
 
@@ -47,18 +55,39 @@ public final class HardwareEncoder {
         }
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let status = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: width,
-            height: height,
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: encoderSpec as CFDictionary,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: callback,
-            refcon: refcon,
-            compressionSessionOut: &sessionOut
-        )
+
+        // Try hardware encoder first, fall back to any available encoder
+        let encoderSpecs: [[CFString: Any]] = [
+            [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
+                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
+            ],
+            [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
+            ],
+            [:],  // No spec — use whatever's available
+        ]
+
+        var status: OSStatus = -1
+        var usedHW = "unknown"
+        for (i, spec) in encoderSpecs.enumerated() {
+            status = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: width,
+                height: height,
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: spec as CFDictionary,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: callback,
+                refcon: refcon,
+                compressionSessionOut: &sessionOut
+            )
+            if status == noErr {
+                usedHW = i == 0 ? "hardware (required)" : i == 1 ? "hardware (preferred)" : "software fallback"
+                break
+            }
+        }
 
         guard status == noErr, let session = sessionOut else {
             throw CaptureError.encoderCreationFailed(status)
@@ -82,7 +111,7 @@ public final class HardwareEncoder {
         }
 
         VTCompressionSessionPrepareToEncodeFrames(session)
-        print("[Encoder] Hardware H.264 encoder started (\(width)x\(height) @ \(fps)fps, \(bitrate/1_000_000)Mbps)")
+        print("[Encoder] H.264 encoder started (\(width)x\(height) @ \(fps)fps, \(bitrate/1_000_000)Mbps, \(usedHW))")
     }
 
     public func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime, duration: CMTime) {
