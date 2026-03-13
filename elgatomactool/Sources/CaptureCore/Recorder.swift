@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 
 /// Writes encoded H.264 frames to an MP4 file using AVAssetWriter.
