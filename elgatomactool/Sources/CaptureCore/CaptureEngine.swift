@@ -4,29 +4,25 @@ import CoreVideo
 import CoreImage
 import ImageIO
 
-/// Orchestrates the full capture pipeline: device → preview + encoder → replay buffer / recorder.
-@objc final class CaptureEngine: NSObject {
+/// Orchestrates the full capture pipeline: device -> preview + encoder -> replay buffer / recorder.
+public final class CaptureEngine: NSObject {
 
-    let captureSession = AVCaptureSession()
-    let encoder: HardwareEncoder
-    let replayBuffer: ReplayBuffer
-    let recorder = Recorder()
+    public let captureSession = AVCaptureSession()
+    public let encoder: HardwareEncoder
+    public let replayBuffer: ReplayBuffer
+    public let recorder = Recorder()
 
-    /// The latest raw pixel buffer, used for screenshots.
-    private(set) var latestPixelBuffer: CVPixelBuffer?
+    private(set) public var latestPixelBuffer: CVPixelBuffer?
     private let latestFrameLock = NSLock()
 
-    /// Called on main thread when recording state changes.
-    var onStateChange: (() -> Void)?
+    public var onStateChange: (() -> Void)?
 
     private let captureQueue = DispatchQueue(label: "capture.output", qos: .userInteractive)
     private var device: AVCaptureDevice?
     private var isRunning = false
-
-    // Passthrough format description for the recorder (built from first encoded keyframe)
     private var recordingFormatDesc: CMFormatDescription?
 
-    init(replayDuration: Double = 30, bitrateMbps: Int = 20) {
+    public init(replayDuration: Double = 30, bitrateMbps: Int = 20) {
         self.encoder = HardwareEncoder(bitrateMbps: bitrateMbps)
         self.replayBuffer = ReplayBuffer(duration: replayDuration)
         super.init()
@@ -38,10 +34,19 @@ import ImageIO
 
     // MARK: - Setup & Start
 
-    func start() throws {
+    /// Start capture with auto-detected Elgato device.
+    public func start() throws {
         guard let device = DeviceDiscovery.findElgato() else {
             throw CaptureError.noDeviceFound
         }
+        try start(with: device)
+    }
+
+    /// Start capture with a specific device.
+    public func start(with device: AVCaptureDevice) throws {
+        // Stop any existing session
+        if isRunning { stop() }
+
         self.device = device
         print("[Capture] Using device: \(device.localizedName)")
 
@@ -49,7 +54,6 @@ import ImageIO
             throw CaptureError.noSupportedFormat
         }
 
-        // Configure device
         try device.lockForConfiguration()
         device.activeFormat = format
         device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
@@ -59,19 +63,20 @@ import ImageIO
         let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         print("[Capture] Format: \(dims.width)x\(dims.height) @ 60fps")
 
-        // Build capture session
         captureSession.beginConfiguration()
-        // Don't set a session preset — we configure activeFormat directly on the device,
-        // which takes priority over any preset.
+
+        // Remove existing inputs/outputs
+        for input in captureSession.inputs { captureSession.removeInput(input) }
+        for output in captureSession.outputs { captureSession.removeOutput(output) }
 
         let input = try AVCaptureDeviceInput(device: device)
         guard captureSession.canAddInput(input) else {
+            captureSession.commitConfiguration()
             throw CaptureError.captureSessionFailed("Cannot add device input")
         }
         captureSession.addInput(input)
 
         let output = AVCaptureVideoDataOutput()
-        // Request NV12 — matches hardware encoder's preferred input, avoids conversions
         output.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
@@ -79,22 +84,21 @@ import ImageIO
         output.setSampleBufferDelegate(self, queue: captureQueue)
 
         guard captureSession.canAddOutput(output) else {
+            captureSession.commitConfiguration()
             throw CaptureError.captureSessionFailed("Cannot add video output")
         }
         captureSession.addOutput(output)
 
         captureSession.commitConfiguration()
 
-        // Start encoder
         try encoder.start()
 
-        // Start capture
         captureSession.startRunning()
         isRunning = true
         print("[Capture] Pipeline running")
     }
 
-    func stop() {
+    public func stop() {
         captureSession.stopRunning()
         encoder.stop()
         isRunning = false
@@ -102,7 +106,7 @@ import ImageIO
 
     // MARK: - Actions
 
-    func toggleRecording() {
+    public func toggleRecording() {
         if recorder.isRecording {
             Task { @MainActor in
                 _ = await recorder.stopRecording()
@@ -119,7 +123,7 @@ import ImageIO
         }
     }
 
-    func saveReplay(lastSeconds: Double? = nil) {
+    public func saveReplay(lastSeconds: Double? = nil) {
         let frames = replayBuffer.getReplayFrames(lastSeconds: lastSeconds)
         guard !frames.isEmpty else {
             print("[Capture] Replay buffer is empty, nothing to save")
@@ -143,7 +147,7 @@ import ImageIO
         }
     }
 
-    func takeScreenshot() {
+    public func takeScreenshot() {
         latestFrameLock.lock()
         let pixelBuffer = latestPixelBuffer
         latestFrameLock.unlock()
@@ -284,9 +288,9 @@ import ImageIO
 
 extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
 
-    func captureOutput(_ output: AVCaptureOutput,
-                       didOutput sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
+    public func captureOutput(_ output: AVCaptureOutput,
+                              didOutput sampleBuffer: CMSampleBuffer,
+                              from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         latestFrameLock.lock()
@@ -298,9 +302,9 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         encoder.encode(pixelBuffer, presentationTime: pts, duration: duration)
     }
 
-    func captureOutput(_ output: AVCaptureOutput,
-                       didDrop sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
+    public func captureOutput(_ output: AVCaptureOutput,
+                              didDrop sampleBuffer: CMSampleBuffer,
+                              from connection: AVCaptureConnection) {
         print("[Capture] Frame dropped")
     }
 }

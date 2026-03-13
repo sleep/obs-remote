@@ -2,7 +2,7 @@ import AVFoundation
 import CoreMedia
 
 /// Writes encoded H.264 frames to an MP4 file using AVAssetWriter.
-final class Recorder {
+public final class Recorder {
 
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -10,13 +10,13 @@ final class Recorder {
     private var sessionStarted = false
     private let outputDir: URL
 
-    init(outputDir: URL? = nil) {
+    public init(outputDir: URL? = nil) {
         self.outputDir = outputDir ?? Recorder.defaultOutputDir()
     }
 
     /// Start recording to a new MP4 file. Returns the file path.
     @discardableResult
-    func startRecording(width: Int = 1920, height: Int = 1080) throws -> URL {
+    public func startRecording(width: Int = 1920, height: Int = 1080) throws -> URL {
         let filename = Recorder.timestampedFilename(prefix: "recording", ext: "mp4")
         let url = outputDir.appendingPathComponent(filename)
 
@@ -41,7 +41,7 @@ final class Recorder {
     }
 
     /// Append an encoded frame to the recording.
-    func appendFrame(_ sampleBuffer: CMSampleBuffer) {
+    public func appendFrame(_ sampleBuffer: CMSampleBuffer) {
         guard isWriting, let input = videoInput, let writer = assetWriter else { return }
         guard writer.status == .writing else {
             if writer.status == .failed {
@@ -63,7 +63,7 @@ final class Recorder {
     }
 
     /// Stop recording and finalize the file.
-    func stopRecording() async -> URL? {
+    public func stopRecording() async -> URL? {
         guard isWriting, let writer = assetWriter else { return nil }
         isWriting = false
 
@@ -84,7 +84,7 @@ final class Recorder {
     }
 
     /// Write an array of encoded frames to a new MP4 file (used for saving replays).
-    static func writeFrames(_ frames: [EncodedFrame], to url: URL,
+    public static func writeFrames(_ frames: [EncodedFrame], to url: URL,
                             width: Int = 1920, height: Int = 1080) async -> Bool {
         guard !frames.isEmpty else { return false }
         guard let firstKeyframe = frames.first(where: { $0.isKeyframe }) else { return false }
@@ -139,16 +139,16 @@ final class Recorder {
         }
     }
 
-    var isRecording: Bool { isWriting }
+    public var isRecording: Bool { isWriting }
 
     // MARK: - Helpers
 
-    static func defaultOutputDir() -> URL {
+    public static func defaultOutputDir() -> URL {
         let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first!
         return movies.appendingPathComponent("ElgatoCapture")
     }
 
-    static func timestampedFilename(prefix: String, ext: String) -> String {
+    public static func timestampedFilename(prefix: String, ext: String) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return "\(prefix)_\(formatter.string(from: Date())).\(ext)"

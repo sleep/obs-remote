@@ -1,10 +1,9 @@
 import AVFoundation
 
-/// Discovers Elgato capture devices (and other external video capture cards).
-enum DeviceDiscovery {
+public enum DeviceDiscovery {
 
-    /// Returns all external video capture devices, prioritizing Elgato-branded ones.
-    static func findCaptureDevices() -> [AVCaptureDevice] {
+    /// Returns all external video capture devices.
+    public static func findCaptureDevices() -> [AVCaptureDevice] {
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.externalUnknown],
             mediaType: .video,
@@ -14,22 +13,22 @@ enum DeviceDiscovery {
     }
 
     /// Returns the first Elgato device, or falls back to any external capture device.
-    static func findElgato() -> AVCaptureDevice? {
+    public static func findElgato() -> AVCaptureDevice? {
         let devices = findCaptureDevices()
 
-        // Prefer device with "Elgato" in the name
-        if let elgato = devices.first(where: {
-            $0.localizedName.localizedCaseInsensitiveContains("elgato")
+        let elgatoKeywords = ["elgato", "cam link", "hd60", "4k60"]
+        if let elgato = devices.first(where: { device in
+            let name = device.localizedName.lowercased()
+            return elgatoKeywords.contains(where: { name.contains($0) })
         }) {
             return elgato
         }
 
-        // Fall back to any external capture device
         return devices.first
     }
 
     /// Lists all discovered capture devices to stdout.
-    static func printDevices() {
+    public static func printDevices() {
         let devices = findCaptureDevices()
         if devices.isEmpty {
             print("No external capture devices found.")
@@ -39,7 +38,6 @@ enum DeviceDiscovery {
         print("Found \(devices.count) capture device(s):")
         for (i, device) in devices.enumerated() {
             print("  [\(i)] \(device.localizedName) (\(device.uniqueID))")
-            // Print supported 1080p60 formats
             for format in device.formats {
                 let desc = format.formatDescription
                 let dims = CMVideoFormatDescriptionGetDimensions(desc)
@@ -54,8 +52,8 @@ enum DeviceDiscovery {
         }
     }
 
-    /// Finds the best 1080p60 format for a device. Prefers NV12 (420v) for hardware pipeline efficiency.
-    static func best1080p60Format(for device: AVCaptureDevice) -> (AVCaptureDevice.Format, AVFrameRateRange)? {
+    /// Finds the best 1080p60 format for a device. Prefers NV12 for hardware pipeline efficiency.
+    public static func best1080p60Format(for device: AVCaptureDevice) -> (AVCaptureDevice.Format, AVFrameRateRange)? {
         var bestFormat: AVCaptureDevice.Format?
         var bestRange: AVFrameRateRange?
         var bestScore = -1
@@ -67,8 +65,6 @@ enum DeviceDiscovery {
 
             for range in format.videoSupportedFrameRateRanges where range.maxFrameRate >= 59.0 {
                 let subType = CMFormatDescriptionGetMediaSubType(desc)
-                // Prefer NV12 (kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange = '420v')
-                // then BGRA, then anything else
                 var score = 0
                 if subType == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange { score = 3 }
                 else if subType == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange { score = 2 }

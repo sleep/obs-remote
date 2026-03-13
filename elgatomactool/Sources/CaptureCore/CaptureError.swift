@@ -1,12 +1,12 @@
 import Foundation
 
-enum CaptureError: LocalizedError {
+public enum CaptureError: LocalizedError {
     case noDeviceFound
     case noSupportedFormat
     case captureSessionFailed(String)
     case encoderCreationFailed(OSStatus)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .noDeviceFound:
             return "No Elgato or external capture device found"

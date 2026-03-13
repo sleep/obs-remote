@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CaptureCore
 
 // MARK: - CLI argument parsing
 

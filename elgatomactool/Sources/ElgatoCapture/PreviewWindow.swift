@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CaptureCore
 
 /// NSWindow subclass that displays the live capture preview and handles keyboard shortcuts.
 final class PreviewWindow: NSWindow {
