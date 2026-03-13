@@ -4,6 +4,7 @@ import CaptureCore
 
 struct ContentView: View {
     @StateObject private var vm = CaptureViewModel()
+    @State private var showReplaySettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -132,7 +133,10 @@ struct ContentView: View {
                 // Action buttons
                 if vm.isCapturing {
                     captureControls
-                    replaySettings
+
+                    if showReplaySettings {
+                        replaySettings
+                    }
                 }
 
                 // Error / status
@@ -230,15 +234,49 @@ struct ContentView: View {
                 vm.takeScreenshot()
             }
 
-            // Save Replay
-            ControlButton(
-                title: "Save Replay",
-                icon: "arrow.counterclockwise.circle.fill",
-                color: .green,
-                shortcut: "Space"
-            ) {
-                vm.saveReplay()
+            // Save Replay — compound button with config summary + settings toggle
+            HStack(spacing: 0) {
+                // Main save action
+                Button {
+                    vm.saveReplay()
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "arrow.counterclockwise.circle.fill")
+                            .font(.system(size: 20))
+                        Text("Save Replay")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("\(formatDuration(vm.replayDuration))  \(vm.estimatedSizeLabel(forSeconds: vm.replayDuration))")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Text("Space")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.green)
+                    .frame(width: 100, height: 68)
+                }
+                .buttonStyle(.plain)
+
+                // Settings toggle
+                Divider()
+                    .frame(height: 40)
+                    .padding(.horizontal, 1)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showReplaySettings.toggle()
+                    }
+                } label: {
+                    Image(systemName: showReplaySettings ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 68)
+                }
+                .buttonStyle(.plain)
+                .help("Replay buffer settings")
             }
+            .padding(6)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
 
             Spacer()
 
