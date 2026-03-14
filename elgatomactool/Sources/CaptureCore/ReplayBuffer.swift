@@ -4,10 +4,12 @@ import CoreMedia
 public final class ReplayBuffer {
 
     private var frames: [EncodedFrame] = []
+    private var audioSamples: [AudioSample] = []
     private let lock = NSLock()
     private(set) public var maxDuration: Double
     private(set) public var maxBytes: Int  // 0 = unlimited
     private var totalBytes: Int = 0
+    private var audioBytes: Int = 0
 
     public init(duration: Double = 30.0, maxBytes: Int = 0) {
         self.maxDuration = duration
@@ -32,10 +34,36 @@ public final class ReplayBuffer {
         trimLocked()
     }
 
+    public func appendAudio(_ sample: AudioSample) {
+        lock.lock()
+        defer { lock.unlock() }
+        audioSamples.append(sample)
+        audioBytes += sample.size
+    }
+
     public func getReplayFrames(lastSeconds seconds: Double? = nil) -> [EncodedFrame] {
         lock.lock()
         defer { lock.unlock() }
+        return getVideoFramesLocked(lastSeconds: seconds)
+    }
 
+    /// Return both video frames and matching audio samples for a replay, under a single lock.
+    public func getReplayData(lastSeconds seconds: Double? = nil) -> (video: [EncodedFrame], audio: [AudioSample]) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let video = getVideoFramesLocked(lastSeconds: seconds)
+        guard let first = video.first, let last = video.last else { return ([], []) }
+
+        let startPTS = first.pts
+        let endPTS = last.pts
+        let audio = audioSamples.filter { sample in
+            CMTimeCompare(sample.pts, startPTS) >= 0 && CMTimeCompare(sample.pts, endPTS) <= 0
+        }
+        return (video, audio)
+    }
+
+    private func getVideoFramesLocked(lastSeconds seconds: Double? = nil) -> [EncodedFrame] {
         guard !frames.isEmpty else { return [] }
 
         let duration = seconds ?? maxDuration
@@ -115,6 +143,23 @@ public final class ReplayBuffer {
             if removeCount > 0 {
                 for i in 0..<removeCount { totalBytes -= frames[i].size }
                 frames.removeFirst(removeCount)
+            }
+        }
+
+        // Trim audio to align with video time window
+        if let firstFrame = frames.first {
+            let audioCutoff = firstFrame.pts
+            var audioRemoveCount = 0
+            for i in 0..<audioSamples.count {
+                if CMTimeCompare(audioSamples[i].pts, audioCutoff) < 0 {
+                    audioRemoveCount = i + 1
+                } else {
+                    break
+                }
+            }
+            if audioRemoveCount > 0 {
+                for i in 0..<audioRemoveCount { audioBytes -= audioSamples[i].size }
+                audioSamples.removeFirst(audioRemoveCount)
             }
         }
     }

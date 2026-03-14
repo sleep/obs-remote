@@ -6,6 +6,7 @@ public final class Recorder {
 
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
+    private var audioInput: AVAssetWriterInput?
     private var isWriting = false
     private var sessionStarted = false
     public let outputDir: URL
@@ -17,7 +18,8 @@ public final class Recorder {
     /// Start recording to a new MP4 file. Returns the file path.
     @discardableResult
     public func startRecording(width: Int = 1920, height: Int = 1080,
-                               sourceFormatHint: CMFormatDescription? = nil) throws -> URL {
+                               sourceFormatHint: CMFormatDescription? = nil,
+                               audioFormatHint: CMFormatDescription? = nil) throws -> URL {
         let filename = Recorder.timestampedFilename(prefix: "recording", ext: "mp4")
         let url = outputDir.appendingPathComponent(filename)
 
@@ -29,12 +31,32 @@ public final class Recorder {
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
                                        sourceFormatHint: sourceFormatHint)
         input.expectsMediaDataInRealTime = true
-
         writer.add(input)
+
+        // Add audio track if audio format is available
+        var aInput: AVAssetWriterInput?
+        if let audioFmt = audioFormatHint,
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(audioFmt)?.pointee {
+            let channels = max(Int(asbd.mChannelsPerFrame), 1)
+            let sampleRate = asbd.mSampleRate
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVNumberOfChannelsKey: channels,
+                AVSampleRateKey: sampleRate,
+                AVEncoderBitRateKey: 128_000,
+            ]
+            let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings,
+                                         sourceFormatHint: audioFmt)
+            ai.expectsMediaDataInRealTime = true
+            writer.add(ai)
+            aInput = ai
+        }
+
         writer.startWriting()
 
         self.assetWriter = writer
         self.videoInput = input
+        self.audioInput = aInput
         self.isWriting = true
         self.sessionStarted = false
 
@@ -64,12 +86,22 @@ public final class Recorder {
         }
     }
 
+    /// Append an audio sample buffer to the recording.
+    public func appendAudioSample(_ sampleBuffer: CMSampleBuffer) {
+        guard isWriting, sessionStarted, let input = audioInput, let writer = assetWriter else { return }
+        guard writer.status == .writing else { return }
+        if input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+
     /// Stop recording and finalize the file.
     public func stopRecording() async -> URL? {
         guard isWriting, let writer = assetWriter else { return nil }
         isWriting = false
 
         videoInput?.markAsFinished()
+        audioInput?.markAsFinished()
 
         let writerURL = writer.outputURL
         return await withCheckedContinuation { continuation in
@@ -86,10 +118,16 @@ public final class Recorder {
     }
 
     /// Write an array of encoded frames to a new MP4 file (used for saving replays).
-    public static func writeFrames(_ frames: [EncodedFrame], to url: URL,
+    public static func writeFrames(_ frames: [EncodedFrame], audioSamples: [AudioSample] = [],
+                            to url: URL,
                             width: Int = 1920, height: Int = 1080) async -> Bool {
-        guard !frames.isEmpty else { return false }
-        guard let firstKeyframe = frames.first(where: { $0.isKeyframe }) else { return false }
+        // Drop any leading non-keyframes — the writer can't start mid-GOP
+        let startIdx = frames.firstIndex(where: { $0.isKeyframe }) ?? frames.count
+        let usable = Array(frames[startIdx...])
+        guard !usable.isEmpty else {
+            print("[Recorder] No keyframes found in \(frames.count) frames, cannot write replay")
+            return false
+        }
 
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
@@ -97,7 +135,7 @@ public final class Recorder {
 
             let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 
-            guard let formatDesc = createFormatDescription(from: firstKeyframe) else {
+            guard let formatDesc = createFormatDescription(from: usable[0]) else {
                 print("[Recorder] Failed to create format description")
                 return false
             }
@@ -106,12 +144,33 @@ public final class Recorder {
                                             sourceFormatHint: formatDesc)
             input.expectsMediaDataInRealTime = false
             writer.add(input)
+
+            // Add audio track if audio samples are available
+            var audioInput: AVAssetWriterInput?
+            if let firstAudio = audioSamples.first,
+               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(firstAudio.formatDescription)?.pointee {
+                let channels = max(Int(asbd.mChannelsPerFrame), 1)
+                let sampleRate = asbd.mSampleRate
+                let audioSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVNumberOfChannelsKey: channels,
+                    AVSampleRateKey: sampleRate,
+                    AVEncoderBitRateKey: 128_000,
+                ]
+                let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings,
+                                             sourceFormatHint: firstAudio.formatDescription)
+                ai.expectsMediaDataInRealTime = false
+                writer.add(ai)
+                audioInput = ai
+            }
+
             writer.startWriting()
 
-            let baseTime = frames[0].pts
+            let baseTime = usable[0].pts
             writer.startSession(atSourceTime: .zero)
 
-            for frame in frames {
+            var written = 0
+            for frame in usable {
                 guard let sampleBuffer = createSampleBuffer(
                     from: frame, formatDescription: formatDesc, baseTime: baseTime
                 ) else { continue }
@@ -119,7 +178,30 @@ public final class Recorder {
                 while !input.isReadyForMoreMediaData {
                     try await Task.sleep(nanoseconds: 1_000_000)
                 }
-                input.append(sampleBuffer)
+
+                if !input.append(sampleBuffer) {
+                    print("[Recorder] Append failed at frame \(written): \(writer.error?.localizedDescription ?? "unknown")")
+                    break
+                }
+                written += 1
+            }
+
+            // Write audio samples
+            if let aInput = audioInput {
+                var audioWritten = 0
+                for sample in audioSamples {
+                    guard let sampleBuffer = createAudioSampleBuffer(from: sample, baseTime: baseTime) else { continue }
+                    while !aInput.isReadyForMoreMediaData {
+                        try await Task.sleep(nanoseconds: 1_000_000)
+                    }
+                    if !aInput.append(sampleBuffer) {
+                        print("[Recorder] Audio append failed at sample \(audioWritten): \(writer.error?.localizedDescription ?? "unknown")")
+                        break
+                    }
+                    audioWritten += 1
+                }
+                aInput.markAsFinished()
+                print("[Recorder] Wrote \(audioWritten) audio samples")
             }
 
             input.markAsFinished()
@@ -192,6 +274,67 @@ public final class Recorder {
         return status == noErr ? formatDesc : nil
     }
 
+    /// Create a CMSampleBuffer from an AudioSample for writing to AVAssetWriter.
+    private static func createAudioSampleBuffer(from sample: AudioSample,
+                                                 baseTime: CMTime) -> CMSampleBuffer? {
+        var blockBuffer: CMBlockBuffer?
+        let data = sample.data
+
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: data.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: data.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr, let block = blockBuffer else { return nil }
+
+        status = data.withUnsafeBytes { raw -> OSStatus in
+            guard let ptr = raw.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(
+                with: ptr,
+                blockBuffer: block,
+                offsetIntoDestination: 0,
+                dataLength: data.count
+            )
+        }
+        guard status == noErr else { return nil }
+
+        var sampleBuffer: CMSampleBuffer?
+        let pts = CMTimeSubtract(sample.pts, baseTime)
+        let dur = sample.duration.isValid && sample.duration.seconds > 0
+            ? sample.duration
+            : CMTimeMake(value: 1024, timescale: 48000)
+        var timing = CMSampleTimingInfo(
+            duration: dur,
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+
+        let numSamples = sample.numSamples
+        guard numSamples > 0 else { return nil }
+        let sampleSize = data.count / numSamples
+        var sizes = [Int](repeating: sampleSize, count: numSamples)
+
+        status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: block,
+            formatDescription: sample.formatDescription,
+            sampleCount: numSamples,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: numSamples,
+            sampleSizeArray: &sizes,
+            sampleBufferOut: &sampleBuffer
+        )
+
+        return status == noErr ? sampleBuffer : nil
+    }
+
     /// Create a CMSampleBuffer from an EncodedFrame for writing to AVAssetWriter.
     private static func createSampleBuffer(from frame: EncodedFrame,
                                             formatDescription: CMFormatDescription,
@@ -224,10 +367,16 @@ public final class Recorder {
         guard status == noErr else { return nil }
 
         var sampleBuffer: CMSampleBuffer?
+        let pts = CMTimeSubtract(frame.pts, baseTime)
+        let dts = CMTimeSubtract(frame.dts, baseTime)
+        // Use PTS for DTS when no B-frames, and ensure duration is valid
+        let dur = frame.duration.isValid && frame.duration.seconds > 0
+            ? frame.duration
+            : CMTimeMake(value: 1, timescale: 60)
         var timing = CMSampleTimingInfo(
-            duration: frame.duration,
-            presentationTimeStamp: CMTimeSubtract(frame.pts, baseTime),
-            decodeTimeStamp: CMTimeSubtract(frame.dts, baseTime)
+            duration: dur,
+            presentationTimeStamp: pts,
+            decodeTimeStamp: dts.isValid ? dts : pts
         )
         var sampleSize = data.count
 

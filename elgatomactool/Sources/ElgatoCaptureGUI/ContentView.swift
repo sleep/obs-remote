@@ -73,7 +73,7 @@ struct ContentView: View {
             ZStack {
                 // Background pattern — visible in letterbox/pillarbox bars
                 Color(white: 0.06)
-                WatermarkView()
+                // WatermarkView()
 
                 videoView
                     .onTapGesture(count: 2) { toggleFullscreen() }
@@ -373,15 +373,31 @@ struct ContentView: View {
 
     // MARK: - Device selector
 
-    private var deviceSelector: some View {
-        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 6) {
-            // Video device row
-            GridRow {
-                Image(systemName: "video.fill")
+    private func devicePickerRow(
+        icon: String,
+        picker: some View,
+        buttons: some View
+    ) -> some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 2) {
+                Image(systemName: icon)
+                    .frame(width: 18, alignment: .center)
                     .foregroundStyle(.secondary)
-                    .gridColumnAlignment(.trailing)
+                picker
+                    .labelsHidden()
+            }
+            .frame(width: 280, alignment: .leading)
 
-                Picker("Device", selection: $vm.selectedDevice) {
+            buttons
+        }
+    }
+
+    private var deviceSelector: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Video device row
+            devicePickerRow(
+                icon: "video.fill",
+                picker: Picker("Device", selection: $vm.selectedDevice) {
                     if vm.availableDevices.isEmpty {
                         Text("No devices").tag(nil as AVCaptureDevice?)
                     }
@@ -395,10 +411,8 @@ struct ContentView: View {
                         }
                         .tag(device as AVCaptureDevice?)
                     }
-                }
-                .labelsHidden()
-
-                HStack(spacing: 6) {
+                },
+                buttons: HStack(spacing: 6) {
                     Button {
                         vm.refreshDevices()
                     } label: {
@@ -430,14 +444,12 @@ struct ContentView: View {
                         .help("Stop capture")
                     }
                 }
-            }
+            )
 
             // Audio device row
-            GridRow {
-                Image(systemName: "waveform")
-                    .foregroundStyle(.secondary)
-
-                Picker("Audio", selection: $vm.selectedAudioDevice) {
+            devicePickerRow(
+                icon: "waveform",
+                picker: Picker("Audio", selection: $vm.selectedAudioDevice) {
                     Text("None").tag(nil as AVCaptureDevice?)
                     ForEach(vm.availableAudioDevices, id: \.uniqueID) { device in
                         HStack {
@@ -449,10 +461,8 @@ struct ContentView: View {
                         }
                         .tag(device as AVCaptureDevice?)
                     }
-                }
-                .labelsHidden()
-
-                HStack(spacing: 6) {
+                },
+                buttons: HStack(spacing: 6) {
                     Button {
                         vm.refreshDevices()
                     } label: {
@@ -474,7 +484,7 @@ struct ContentView: View {
                         AudioLevelBar(level: vm.audioPeakLevel, width: 60, height: 6)
                     }
                 }
-            }
+            )
         }
     }
 
@@ -623,7 +633,8 @@ struct ContentView: View {
                 Image(systemName: showReplaySettings ? "chevron.up" : "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 60)
+                    .frame(width: 28, height: 60)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Replay buffer settings")

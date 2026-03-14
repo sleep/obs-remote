@@ -13,6 +13,16 @@ public struct EncodedFrame {
     public var size: Int { data.count + (parameterSets?.count ?? 0) }
 }
 
+public struct AudioSample {
+    public let data: Data
+    public let pts: CMTime
+    public let duration: CMTime
+    public let numSamples: CMItemCount
+    public let formatDescription: CMFormatDescription
+
+    public var size: Int { data.count }
+}
+
 public final class HardwareEncoder {
 
     private var session: VTCompressionSession?

@@ -76,6 +76,7 @@ public final class CaptureEngine: NSObject {
     private var playerNode: AVAudioPlayerNode?
     private var passthroughFormat: AVAudioFormat?
     private(set) public var isPassthroughEnabled = false
+    private var audioFormatDesc: CMFormatDescription?
 
     /// Snapshot the audio levels accumulated since the last call and reset the accumulators.
     /// Returns levels in linear scale (0.0 … 1.0).
@@ -487,7 +488,7 @@ public final class CaptureEngine: NSObject {
                     formatHint = nil
                 }
                 recordingFormatDesc = formatHint
-                try recorder.startRecording(sourceFormatHint: formatHint)
+                try recorder.startRecording(sourceFormatHint: formatHint, audioFormatHint: audioFormatDesc)
                 DispatchQueue.main.async { self.onStateChange?() }
             } catch {
                 print("[Capture] Failed to start recording: \(error)")
@@ -496,8 +497,8 @@ public final class CaptureEngine: NSObject {
     }
 
     public func saveReplay(lastSeconds: Double? = nil, completion: ((Bool) -> Void)? = nil) {
-        let frames = replayBuffer.getReplayFrames(lastSeconds: lastSeconds)
-        guard !frames.isEmpty else {
+        let replayData = replayBuffer.getReplayData(lastSeconds: lastSeconds)
+        guard !replayData.video.isEmpty else {
             print("[Capture] Replay buffer is empty, nothing to save")
             completion?(false)
             return
@@ -507,12 +508,12 @@ public final class CaptureEngine: NSObject {
         let filename = Recorder.timestampedFilename(prefix: "replay", ext: "mp4")
         let url = recorder.outputDir.appendingPathComponent(filename)
 
-        print("[Capture] Saving replay (\(String(format: "%.1f", stats.duration))s, \(frames.count) frames)...")
+        print("[Capture] Saving replay (\(String(format: "%.1f", stats.duration))s, \(replayData.video.count) frames, \(replayData.audio.count) audio samples)...")
 
         // Write on a background task so we don't block the main thread
         let onChange = onStateChange
         Task.detached {
-            let success = await Recorder.writeFrames(frames, to: url)
+            let success = await Recorder.writeFrames(replayData.video, audioSamples: replayData.audio, to: url)
             if success {
                 print("[Capture] Replay saved: \(url.path)")
             } else {
@@ -753,6 +754,23 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         // Audio passthrough
         if isPassthroughEnabled {
             forwardToPassthrough(sampleBuffer, floatData: floatPtr, sampleCount: sampleCount)
+        }
+
+        // Store audio in replay buffer
+        if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            if audioFormatDesc == nil { audioFormatDesc = formatDesc }
+            let audioData = Data(bytes: ptr, count: length)
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let duration = CMSampleBufferGetDuration(sampleBuffer)
+            let numSamples = CMSampleBufferGetNumSamples(sampleBuffer)
+            let sample = AudioSample(data: audioData, pts: pts, duration: duration,
+                                      numSamples: numSamples, formatDescription: formatDesc)
+            replayBuffer.appendAudio(sample)
+        }
+
+        // Forward to recorder for live recording
+        if recorder.isRecording {
+            recorder.appendAudioSample(sampleBuffer)
         }
     }
 
