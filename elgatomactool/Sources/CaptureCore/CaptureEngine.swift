@@ -15,6 +15,7 @@ public final class CaptureEngine: NSObject {
 
     private(set) public var latestPixelBuffer: CVPixelBuffer?
     private let latestFrameLock = NSLock()
+    private let thumbnailContext = CIContext(options: [.useSoftwareRenderer: false])
 
     // Live FPS tracking
     private var frameCount: Int = 0
@@ -561,6 +562,20 @@ public final class CaptureEngine: NSObject {
         CGImageDestinationAddImage(dest, cgImage, nil)
         CGImageDestinationFinalize(dest)
         print("[Capture] Screenshot saved: \(url.path)")
+    }
+
+    /// Create a small thumbnail CGImage from the latest captured frame.
+    /// Thread-safe — designed to be called from a background queue.
+    public func createThumbnail(maxWidth: CGFloat = 160) -> CGImage? {
+        latestFrameLock.lock()
+        let pb = latestPixelBuffer
+        latestFrameLock.unlock()
+        guard let pb else { return nil }
+
+        let ci = CIImage(cvPixelBuffer: pb)
+        let scale = maxWidth / ci.extent.width
+        let scaled = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return thumbnailContext.createCGImage(scaled, from: scaled.extent)
     }
 
     // MARK: - Private

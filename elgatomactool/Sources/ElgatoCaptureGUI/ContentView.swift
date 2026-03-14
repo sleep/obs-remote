@@ -179,7 +179,12 @@ struct ContentView: View {
                     // Left: device selectors
                     deviceSelector
 
-                    Spacer()
+                    if vm.isCapturing && !vm.replayThumbnails.isEmpty {
+                        replayThumbnailStrip
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    } else {
+                        Spacer()
+                    }
 
                     // Right: action buttons or Start Capture
                     if vm.isCapturing {
@@ -778,5 +783,51 @@ struct ContentView: View {
         let name = device.localizedName.lowercased()
         let keywords = ["elgato", "cam link", "hd60", "4k60", "game capture"]
         return keywords.contains(where: { name.contains($0) })
+    }
+
+    // MARK: - Replay thumbnail strip
+
+    private var replayThumbnailStrip: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(vm.replayThumbnails) { thumb in
+                        VStack(spacing: 2) {
+                            Image(nsImage: thumb.image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 45)
+                                .clipped()
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(.white.opacity(0.1), lineWidth: 0.5)
+                                )
+                            Text(thumbnailAgeLabel(thumb.capturedAt))
+                                .font(.system(size: 8, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        .id(thumb.id)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+            }
+            .frame(height: 68)
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            .onChange(of: vm.replayThumbnails.count) { _ in
+                if let last = vm.replayThumbnails.last {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        proxy.scrollTo(last.id, anchor: .trailing)
+                    }
+                }
+            }
+        }
+    }
+
+    private func thumbnailAgeLabel(_ date: Date) -> String {
+        let age = Int(Date().timeIntervalSince(date))
+        if age < 60 { return "-\(age)s" }
+        return "-\(age / 60)m\(age % 60)s"
     }
 }

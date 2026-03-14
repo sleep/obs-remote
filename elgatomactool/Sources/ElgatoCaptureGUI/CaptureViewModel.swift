@@ -8,6 +8,12 @@ enum ActionFeedback: Equatable {
     case idle, inProgress, success, failed
 }
 
+struct ReplayThumbnail: Identifiable {
+    let id = UUID()
+    let image: NSImage
+    let capturedAt: Date
+}
+
 @MainActor
 final class CaptureViewModel: ObservableObject {
 
@@ -35,6 +41,7 @@ final class CaptureViewModel: ObservableObject {
     @Published var recordingDuration: TimeInterval = 0
     @Published var screenshotFeedback: ActionFeedback = .idle
     @Published var replaySaveFeedback: ActionFeedback = .idle
+    @Published var replayThumbnails: [ReplayThumbnail] = []
     @Published var bufferDuration: Double = 0
     @Published var bufferFrameCount: Int = 0
     @Published var bufferSizeMB: Int = 0
@@ -91,6 +98,7 @@ final class CaptureViewModel: ObservableObject {
         didSet {
             applyReplayLimits()
             settings?.replayDuration = replayDuration
+            trimOldThumbnails()
         }
     }
     @Published var customReplayDuration: String = "" // for custom entry
@@ -153,6 +161,7 @@ final class CaptureViewModel: ObservableObject {
     let systemStats = SystemStatsMonitor()
     private var statusTimer: Timer?
     private var audioMeterTimer: Timer?
+    private var thumbnailTimer: Timer?
     private var settingsCancellables: Set<AnyCancellable> = []
     private var appNapActivity: NSObjectProtocol?
 
@@ -376,6 +385,7 @@ final class CaptureViewModel: ObservableObject {
             }
 
             startStatusTimer()
+            startThumbnailTimer()
         } catch {
             errorMessage = error.localizedDescription
             isCapturing = false
@@ -391,6 +401,8 @@ final class CaptureViewModel: ObservableObject {
         // engine.stop() falls back to preview mode automatically
         isPreviewing = engine.isPreviewing
         stopStatusTimer()
+        stopThumbnailTimer()
+        replayThumbnails = []
         statusMessage = "Stopped"
         liveFPS = 0
         droppedFrames = 0
@@ -591,6 +603,7 @@ final class CaptureViewModel: ObservableObject {
                 stopStatusTimer()
             }
 
+            stopThumbnailTimer()
             deviceDisconnected = true
             statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
             errorMessage = nil
@@ -652,6 +665,7 @@ final class CaptureViewModel: ObservableObject {
                     self.hasAudio = self.engine.hasAudioInput
                 }
                 self.startStatusTimer()
+                self.startThumbnailTimer()
                 print("[GUI] Reconnected successfully")
             } catch {
                 print("[GUI] Reconnect attempt failed: \(error) — retrying")
@@ -718,5 +732,47 @@ final class CaptureViewModel: ObservableObject {
                 self[keyPath: keyPath] = .idle
             }
         }
+    }
+
+    // MARK: - Replay thumbnails
+
+    private func startThumbnailTimer() {
+        stopThumbnailTimer()
+        // First thumbnail after a brief delay to let frames start flowing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.captureThumbnail()
+        }
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.captureThumbnail()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        thumbnailTimer = timer
+    }
+
+    private func stopThumbnailTimer() {
+        thumbnailTimer?.invalidate()
+        thumbnailTimer = nil
+    }
+
+    private func captureThumbnail() {
+        let engine = self.engine
+        let maxDuration = self.replayDuration
+        Task.detached {
+            guard let cgImage = engine.createThumbnail(maxWidth: 160) else { return }
+            let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.replayThumbnails.append(ReplayThumbnail(image: nsImage, capturedAt: Date()))
+                let cutoff = Date().addingTimeInterval(-maxDuration)
+                self.replayThumbnails.removeAll { $0.capturedAt < cutoff }
+            }
+        }
+    }
+
+    private func trimOldThumbnails() {
+        let cutoff = Date().addingTimeInterval(-replayDuration)
+        replayThumbnails.removeAll { $0.capturedAt < cutoff }
     }
 }
