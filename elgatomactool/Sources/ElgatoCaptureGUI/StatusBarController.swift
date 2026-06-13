@@ -279,10 +279,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         } else {
             NSApp.activate(ignoringOtherApps: true)
         }
-        if let window = NSApp.windows.first(where: { $0.title != "" }) {
-            window.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
-        NotificationCenter.default.post(name: .showSettingsSheet, object: nil)
     }
 
     @objc private func quitApp() {
@@ -299,6 +300,3 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 }
 
-extension Notification.Name {
-    static let showSettingsSheet = Notification.Name("showSettingsSheet")
-}

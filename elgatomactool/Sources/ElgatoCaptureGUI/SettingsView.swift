@@ -3,13 +3,9 @@ import CaptureCore
 
 struct SettingsView: View {
     @EnvironmentObject var settings: AppSettings
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Preferences")
-                .font(.headline)
-
             // General
             GroupBox("General") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -131,13 +127,6 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Spacer()
-
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-            }
         }
         .padding(20)
         .frame(width: 420)

@@ -68,6 +68,12 @@ struct ElgatoCaptureApp: App {
                 }
             }
         }
+
+        Settings {
+            SettingsView()
+                .environmentObject(appDelegate.settings)
+                .environmentObject(appDelegate.viewModel)
+        }
     }
 
     private func overlayStatBinding(for stat: AppSettings.OverlayStat) -> Binding<Bool> {

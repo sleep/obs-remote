@@ -29,7 +29,6 @@ private struct ContentBody: View {
     @ObservedObject var replay: ReplayBufferVM
     @ObservedObject var recording: RecordingVM
     @State private var showReplaySettings = false
-    @State private var showSettings = false
     @State private var isFullscreen = false
 
     var body: some View {
@@ -41,13 +40,6 @@ private struct ContentBody: View {
             }
         }
         .frame(minWidth: isFullscreen ? nil : 640, minHeight: isFullscreen ? nil : 480)
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-                .environmentObject(settings)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showSettingsSheet)) { _ in
-            showSettings = true
-        }
         .onAppear {
             vm.refreshDevices()
         }
@@ -139,7 +131,7 @@ private struct ContentBody: View {
                         stats: stats,
                         isCapturing: recording.isCapturing,
                         onRefresh: { vm.refreshDevices() },
-                        onOpenSettings: { showSettings = true },
+                        onOpenSettings: { openSettings() },
                         onOpenOutputFolder: { vm.openOutputFolder() },
                         onStopCapture: { vm.stopCapture() }
                     )
@@ -185,6 +177,14 @@ private struct ContentBody: View {
                 StatusMessageBanner(recording: recording)
             }
             .padding(16)
+        }
+    }
+
+    private func openSettings() {
+        if #available(macOS 14.0, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
 
