@@ -29,10 +29,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard !didFinishSetup else { return }
         didFinishSetup = true
 
+        NSApp.setActivationPolicy(.regular)
         if settings.startMinimized {
-            NSApp.setActivationPolicy(.accessory)
+            // Hide the auto-opened window without closing it — closing would
+            // trip applicationShouldTerminateAfterLastWindowClosed and flip us
+            // to .accessory, removing the dock icon.
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.title != "" {
+                    window.orderOut(nil)
+                }
+            }
         } else {
-            NSApp.setActivationPolicy(.regular)
             if #available(macOS 14.0, *) {
                 NSApp.activate()
             } else {

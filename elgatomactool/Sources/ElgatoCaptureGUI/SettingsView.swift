@@ -9,7 +9,7 @@ struct SettingsView: View {
             // General
             GroupBox("General") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Start minimized (menu bar only)", isOn: $settings.startMinimized)
+                    Toggle("Start minimized (window hidden)", isOn: $settings.startMinimized)
                     Toggle("Remember last device", isOn: $settings.rememberLastDevice)
                     Toggle("Auto-start capture on launch", isOn: $settings.autoStartCapture)
                 }
