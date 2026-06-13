@@ -118,6 +118,11 @@ public final class Recorder {
     }
 
     /// Write an array of encoded frames to a new MP4 file (used for saving replays).
+    ///
+    /// Video and audio are pushed via `requestMediaDataWhenReady` on dedicated queues so
+    /// AVAssetWriter can drain both tracks in parallel. Writing all video before any audio
+    /// stalls the writer (the video input's high-water mark trips while it waits for audio
+    /// to interleave with) — that's the deadlock this code is designed to avoid.
     public static func writeFrames(_ frames: [EncodedFrame], audioSamples: [AudioSample] = [],
                             to url: URL,
                             width: Int = 1920, height: Int = 1080) async -> Bool {
@@ -133,6 +138,9 @@ public final class Recorder {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                      withIntermediateDirectories: true)
 
+            // Overwrite any leftover file at this path (e.g. an empty file from a previous hung save)
+            try? FileManager.default.removeItem(at: url)
+
             let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 
             guard let formatDesc = createFormatDescription(from: usable[0]) else {
@@ -140,14 +148,27 @@ public final class Recorder {
                 return false
             }
 
-            let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
-                                            sourceFormatHint: formatDesc)
-            input.expectsMediaDataInRealTime = false
-            writer.add(input)
+            let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
+                                                 sourceFormatHint: formatDesc)
+            // Treating data as real-time gives AVAssetWriter the larger internal buffer it
+            // uses for live capture, which avoids spurious high-water-mark stalls when we
+            // batch-feed a 60+ second replay. We're still feeding sequentially, just faster.
+            videoInput.expectsMediaDataInRealTime = true
+            writer.add(videoInput)
+
+            // Filter out audio samples whose PTS is before the first video keyframe.
+            // Those would map to negative timestamps the writer rejects, and the writer
+            // could then stall on the never-appended remainder.
+            let baseTime = usable[0].pts
+            let endTime = usable.last!.pts
+            let filteredAudio = audioSamples.filter { sample in
+                CMTimeCompare(sample.pts, baseTime) >= 0 &&
+                CMTimeCompare(sample.pts, endTime) <= 0
+            }
 
             // Add audio track if audio samples are available
             var audioInput: AVAssetWriterInput?
-            if let firstAudio = audioSamples.first,
+            if let firstAudio = filteredAudio.first,
                let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(firstAudio.formatDescription)?.pointee {
                 let channels = max(Int(asbd.mChannelsPerFrame), 1)
                 let sampleRate = asbd.mSampleRate
@@ -159,64 +180,114 @@ public final class Recorder {
                 ]
                 let ai = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings,
                                              sourceFormatHint: firstAudio.formatDescription)
-                ai.expectsMediaDataInRealTime = false
+                ai.expectsMediaDataInRealTime = true
                 writer.add(ai)
                 audioInput = ai
             }
 
-            writer.startWriting()
-
-            let baseTime = usable[0].pts
+            guard writer.startWriting() else {
+                print("[Recorder] startWriting failed: \(writer.error?.localizedDescription ?? "unknown")")
+                return false
+            }
             writer.startSession(atSourceTime: .zero)
 
-            var written = 0
-            for frame in usable {
-                guard let sampleBuffer = createSampleBuffer(
-                    from: frame, formatDescription: formatDesc, baseTime: baseTime
-                ) else { continue }
+            // Drive each input from its own queue. Apple's `requestMediaDataWhenReady` is
+            // pull-based: it calls back when the input is ready and we feed as much as we can.
+            // Running video and audio on separate queues lets the writer interleave properly.
+            let videoQueue = DispatchQueue(label: "elgato.replay.write.video")
+            let audioQueue = DispatchQueue(label: "elgato.replay.write.audio")
 
-                while !input.isReadyForMoreMediaData {
-                    try await Task.sleep(nanoseconds: 1_000_000)
-                }
-
-                if !input.append(sampleBuffer) {
-                    print("[Recorder] Append failed at frame \(written): \(writer.error?.localizedDescription ?? "unknown")")
-                    break
-                }
-                written += 1
-            }
-
-            // Write audio samples
-            if let aInput = audioInput {
-                var audioWritten = 0
-                for sample in audioSamples {
-                    guard let sampleBuffer = createAudioSampleBuffer(from: sample, baseTime: baseTime) else { continue }
-                    while !aInput.isReadyForMoreMediaData {
-                        try await Task.sleep(nanoseconds: 1_000_000)
-                    }
-                    if !aInput.append(sampleBuffer) {
-                        print("[Recorder] Audio append failed at sample \(audioWritten): \(writer.error?.localizedDescription ?? "unknown")")
-                        break
-                    }
-                    audioWritten += 1
-                }
-                aInput.markAsFinished()
-                print("[Recorder] Wrote \(audioWritten) audio samples")
-            }
-
-            input.markAsFinished()
-
-            let writerRef = writer
             return await withCheckedContinuation { continuation in
-                writerRef.finishWriting {
-                    let success = writerRef.status == .completed
-                    if !success {
-                        print("[Recorder] Replay write failed: \(writerRef.error?.localizedDescription ?? "unknown")")
+                let stateLock = NSLock()
+                var videoDone = false
+                var audioDone = (audioInput == nil)
+                var videoIndex = 0
+                var audioIndex = 0
+                var videoWritten = 0
+                var audioWritten = 0
+                var continuationResumed = false
+
+                func finalizeIfReady() {
+                    stateLock.lock()
+                    let canFinalize = videoDone && audioDone && !continuationResumed
+                    if canFinalize { continuationResumed = true }
+                    stateLock.unlock()
+                    guard canFinalize else { return }
+
+                    print("[Recorder] Finalizing replay (\(videoWritten) video, \(audioWritten) audio)")
+                    writer.finishWriting {
+                        let success = writer.status == .completed
+                        if !success {
+                            print("[Recorder] Replay write failed: \(writer.error?.localizedDescription ?? "unknown")")
+                        }
+                        continuation.resume(returning: success)
                     }
-                    continuation.resume(returning: success)
+                }
+
+                videoInput.requestMediaDataWhenReady(on: videoQueue) {
+                    while videoInput.isReadyForMoreMediaData {
+                        guard writer.status == .writing else {
+                            print("[Recorder] Writer not writing during video pump: status=\(writer.status.rawValue) err=\(writer.error?.localizedDescription ?? "nil")")
+                            videoInput.markAsFinished()
+                            stateLock.lock(); videoDone = true; stateLock.unlock()
+                            finalizeIfReady()
+                            return
+                        }
+                        if videoIndex >= usable.count {
+                            videoInput.markAsFinished()
+                            stateLock.lock(); videoDone = true; stateLock.unlock()
+                            finalizeIfReady()
+                            return
+                        }
+                        let frame = usable[videoIndex]
+                        videoIndex += 1
+                        guard let sb = createSampleBuffer(from: frame, formatDescription: formatDesc, baseTime: baseTime) else {
+                            continue
+                        }
+                        if !videoInput.append(sb) {
+                            print("[Recorder] Video append failed at frame \(videoWritten): \(writer.error?.localizedDescription ?? "unknown")")
+                            videoInput.markAsFinished()
+                            stateLock.lock(); videoDone = true; stateLock.unlock()
+                            finalizeIfReady()
+                            return
+                        }
+                        videoWritten += 1
+                    }
+                }
+
+                if let aInput = audioInput {
+                    aInput.requestMediaDataWhenReady(on: audioQueue) {
+                        while aInput.isReadyForMoreMediaData {
+                            guard writer.status == .writing else {
+                                print("[Recorder] Writer not writing during audio pump: status=\(writer.status.rawValue) err=\(writer.error?.localizedDescription ?? "nil")")
+                                aInput.markAsFinished()
+                                stateLock.lock(); audioDone = true; stateLock.unlock()
+                                finalizeIfReady()
+                                return
+                            }
+                            if audioIndex >= filteredAudio.count {
+                                aInput.markAsFinished()
+                                stateLock.lock(); audioDone = true; stateLock.unlock()
+                                finalizeIfReady()
+                                return
+                            }
+                            let sample = filteredAudio[audioIndex]
+                            audioIndex += 1
+                            guard let sb = createAudioSampleBuffer(from: sample, baseTime: baseTime) else {
+                                continue
+                            }
+                            if !aInput.append(sb) {
+                                print("[Recorder] Audio append failed at sample \(audioWritten): \(writer.error?.localizedDescription ?? "unknown")")
+                                aInput.markAsFinished()
+                                stateLock.lock(); audioDone = true; stateLock.unlock()
+                                finalizeIfReady()
+                                return
+                            }
+                            audioWritten += 1
+                        }
+                    }
                 }
             }
-
         } catch {
             print("[Recorder] Error writing replay: \(error)")
             return false
@@ -234,7 +305,7 @@ public final class Recorder {
 
     public static func timestampedFilename(prefix: String, ext: String) -> String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
         return "\(prefix)_\(formatter.string(from: Date())).\(ext)"
     }
 

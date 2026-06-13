@@ -95,10 +95,22 @@ public final class CaptureEngine: NSObject {
     /// Called on every captured frame with the pixel buffer for display purposes.
     public var onFrameForDisplay: ((CVPixelBuffer) -> Void)?
 
+    // Serializes replay-save attempts so rapid clicks don't pile up concurrent writers,
+    // which used to stack inside AVAssetWriter and exhaust resources / hang.
+    private let saveReplayLock = NSLock()
+    private var isSavingReplay = false
+    public var isSavingReplayInProgress: Bool {
+        saveReplayLock.lock(); defer { saveReplayLock.unlock() }
+        return isSavingReplay
+    }
+
     private let captureQueue = DispatchQueue(label: "capture.output", qos: .userInteractive)
     private var device: AVCaptureDevice?
     private var isRunning = false
     private(set) public var isPreviewing = false
+    // recordingFormatDesc is read from the encoder callback queue and written from both
+    // there and the main thread (toggleRecording). Guard every access with this lock.
+    private let recordingFormatLock = NSLock()
     private var recordingFormatDesc: CMFormatDescription?
     private var captureActivity: NSObjectProtocol?
     /// True once the first keyframe has been received after starting capture.
@@ -244,6 +256,15 @@ public final class CaptureEngine: NSObject {
             audioDeviceInput = nil
         }
         hasAudioInput = false
+        // Clear cached format so the next device's format is picked up on its first buffer.
+        // Without this, swapping audio devices leaves the recorder + replay writer hinted
+        // at the OLD format (sample rate / channel count), causing append failures.
+        audioFormatDesc = nil
+        // Tear down the passthrough engine — it was configured for the previous device's
+        // sample rate / channel count and would mis-play buffers in a different layout.
+        // Leave `isPassthroughEnabled` set so the engine re-initializes lazily on the
+        // first buffer from the new device.
+        resetPassthroughEngine()
         audioLock.lock()
         currentRMS = 0
         currentPeak = 0
@@ -264,6 +285,19 @@ public final class CaptureEngine: NSObject {
     /// Stop audio passthrough playback.
     public func stopPassthrough() {
         isPassthroughEnabled = false
+        tearDownPassthroughEngine()
+        print("[Capture] Audio passthrough disabled")
+    }
+
+    /// Tear down the passthrough engine without changing `isPassthroughEnabled` —
+    /// used when the audio device changes so the engine re-initializes lazily for
+    /// the new device's sample rate / channel count.
+    private func resetPassthroughEngine() {
+        guard passthroughEngine != nil else { return }
+        tearDownPassthroughEngine()
+    }
+
+    private func tearDownPassthroughEngine() {
         playerNode?.stop()
         if let engine = passthroughEngine, engine.isRunning {
             engine.stop()
@@ -275,7 +309,6 @@ public final class CaptureEngine: NSObject {
         passthroughEngine = nil
         playerNode = nil
         passthroughFormat = nil
-        print("[Capture] Audio passthrough disabled")
     }
 
     // MARK: - Preview (lightweight, no encoder)
@@ -474,6 +507,12 @@ public final class CaptureEngine: NSObject {
             let onChange = onStateChange
             Task.detached {
                 _ = await self.recorder.stopRecording()
+                // Clear the format hint so the next recording session derives its own
+                // from the replay buffer / first keyframe (covers device or resolution
+                // changes between sessions).
+                self.recordingFormatLock.lock()
+                self.recordingFormatDesc = nil
+                self.recordingFormatLock.unlock()
                 await MainActor.run { onChange?() }
             }
         } else {
@@ -488,7 +527,9 @@ public final class CaptureEngine: NSObject {
                 } else {
                     formatHint = nil
                 }
+                recordingFormatLock.lock()
                 recordingFormatDesc = formatHint
+                recordingFormatLock.unlock()
                 try recorder.startRecording(sourceFormatHint: formatHint, audioFormatHint: audioFormatDesc)
                 DispatchQueue.main.async { self.onStateChange?() }
             } catch {
@@ -498,10 +539,21 @@ public final class CaptureEngine: NSObject {
     }
 
     public func saveReplay(lastSeconds: Double? = nil, completion: ((Bool) -> Void)? = nil) {
+        saveReplayLock.lock()
+        if isSavingReplay {
+            saveReplayLock.unlock()
+            print("[Capture] Replay save already in progress — ignoring duplicate request")
+            DispatchQueue.main.async { completion?(false) }
+            return
+        }
+        isSavingReplay = true
+        saveReplayLock.unlock()
+
         let replayData = replayBuffer.getReplayData(lastSeconds: lastSeconds)
         guard !replayData.video.isEmpty else {
             print("[Capture] Replay buffer is empty, nothing to save")
-            completion?(false)
+            saveReplayLock.lock(); isSavingReplay = false; saveReplayLock.unlock()
+            DispatchQueue.main.async { completion?(false) }
             return
         }
 
@@ -513,7 +565,7 @@ public final class CaptureEngine: NSObject {
 
         // Write on a background task so we don't block the main thread
         let onChange = onStateChange
-        Task.detached {
+        Task.detached { [weak self] in
             let success = await Recorder.writeFrames(replayData.video, audioSamples: replayData.audio, to: url)
             if success {
                 print("[Capture] Replay saved: \(url.path)")
@@ -521,10 +573,17 @@ public final class CaptureEngine: NSObject {
                 print("[Capture] Failed to save replay")
             }
             await MainActor.run {
+                self?.clearSavingReplayFlag()
                 onChange?()
                 completion?(success)
             }
         }
+    }
+
+    private func clearSavingReplayFlag() {
+        saveReplayLock.lock()
+        isSavingReplay = false
+        saveReplayLock.unlock()
     }
 
     public func takeScreenshot() {
@@ -595,11 +654,13 @@ public final class CaptureEngine: NSObject {
         replayBuffer.append(frame)
 
         if recorder.isRecording {
+            recordingFormatLock.lock()
             if frame.isKeyframe, recordingFormatDesc == nil, let ps = frame.parameterSets {
                 recordingFormatDesc = makeFormatDescription(parameterSets: ps)
             }
-            if let fmt = recordingFormatDesc,
-               let sb = makeSampleBuffer(from: frame, formatDescription: fmt) {
+            let fmt = recordingFormatDesc
+            recordingFormatLock.unlock()
+            if let fmt, let sb = makeSampleBuffer(from: frame, formatDescription: fmt) {
                 recorder.appendFrame(sb)
             }
         }

@@ -39,6 +39,7 @@ public final class ReplayBuffer {
         defer { lock.unlock() }
         audioSamples.append(sample)
         audioBytes += sample.size
+        trimAudioLocked()
     }
 
     public func getReplayFrames(lastSeconds seconds: Double? = nil) -> [EncodedFrame] {
@@ -146,21 +147,38 @@ public final class ReplayBuffer {
             }
         }
 
-        // Trim audio to align with video time window
+        trimAudioLocked()
+    }
+
+    /// Trim audio whose PTS is older than:
+    ///   - the first kept video frame (so audio doesn't outlive its video), or
+    ///   - `maxDuration + 2.0` seconds before the latest audio PTS (so a paused-video
+    ///     stream with live audio doesn't grow without bound).
+    /// Whichever cutoff is later wins.
+    private func trimAudioLocked() {
+        guard !audioSamples.isEmpty else { return }
+
+        let latestAudioPts = audioSamples.last!.pts
+        let durationCutoff = CMTimeSubtract(latestAudioPts,
+                                            CMTimeMakeWithSeconds(maxDuration + 2.0, preferredTimescale: 90000))
+        let cutoff: CMTime
         if let firstFrame = frames.first {
-            let audioCutoff = firstFrame.pts
-            var audioRemoveCount = 0
-            for i in 0..<audioSamples.count {
-                if CMTimeCompare(audioSamples[i].pts, audioCutoff) < 0 {
-                    audioRemoveCount = i + 1
-                } else {
-                    break
-                }
+            cutoff = CMTimeCompare(firstFrame.pts, durationCutoff) > 0 ? firstFrame.pts : durationCutoff
+        } else {
+            cutoff = durationCutoff
+        }
+
+        var audioRemoveCount = 0
+        for i in 0..<audioSamples.count {
+            if CMTimeCompare(audioSamples[i].pts, cutoff) < 0 {
+                audioRemoveCount = i + 1
+            } else {
+                break
             }
-            if audioRemoveCount > 0 {
-                for i in 0..<audioRemoveCount { audioBytes -= audioSamples[i].size }
-                audioSamples.removeFirst(audioRemoveCount)
-            }
+        }
+        if audioRemoveCount > 0 {
+            for i in 0..<audioRemoveCount { audioBytes -= audioSamples[i].size }
+            audioSamples.removeFirst(audioRemoveCount)
         }
     }
 }
