@@ -24,8 +24,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
 
         // Update icon on state changes
-        viewModel.$isCapturing
-            .combineLatest(viewModel.$isRecording)
+        viewModel.recording.$isCapturing
+            .combineLatest(viewModel.recording.$isRecording)
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in self?.updateStatusBar() }
             .store(in: &cancellables)
@@ -56,9 +56,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else { return }
 
         let color: NSColor
-        if viewModel.isRecording {
+        if viewModel.recording.isRecording {
             color = .systemRed
-        } else if viewModel.isCapturing {
+        } else if viewModel.recording.isCapturing {
             color = .systemGreen
         } else {
             color = .systemGray
@@ -108,28 +108,28 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func valueForField(_ field: AppSettings.StatusBarField) -> String? {
         switch field {
         case .device:
-            return viewModel.selectedDevice?.localizedName
+            return viewModel.devices.selectedDevice?.localizedName
         case .resolution:
-            let r = viewModel.captureResolution
+            let r = viewModel.stats.captureResolution
             return r.isEmpty ? nil : r
         case .fps:
-            guard viewModel.isCapturing else { return nil }
-            return String(format: "%.0ffps", viewModel.liveFPS)
+            guard viewModel.recording.isCapturing else { return nil }
+            return String(format: "%.0ffps", viewModel.stats.liveFPS)
         case .buffer:
-            guard viewModel.isCapturing else { return nil }
-            return String(format: "%.0fs/\(formatDuration(viewModel.replayDuration))", viewModel.bufferDuration)
+            guard viewModel.recording.isCapturing else { return nil }
+            return String(format: "%.0fs/\(formatDuration(viewModel.replay.replayDuration))", viewModel.replay.bufferDuration)
         case .bufferMB:
-            guard viewModel.isCapturing else { return nil }
-            return "\(viewModel.bufferSizeMB)MB"
+            guard viewModel.recording.isCapturing else { return nil }
+            return "\(viewModel.replay.bufferSizeMB)MB"
         case .cpu:
-            guard viewModel.isCapturing else { return nil }
-            return String(format: "CPU %.0f%%", viewModel.cpuPercent)
+            guard viewModel.recording.isCapturing else { return nil }
+            return String(format: "CPU %.0f%%", viewModel.stats.cpuPercent)
         case .gpu:
-            guard viewModel.isCapturing else { return nil }
-            return String(format: "GPU %.0f%%", viewModel.gpuPercent)
+            guard viewModel.recording.isCapturing else { return nil }
+            return String(format: "GPU %.0f%%", viewModel.stats.gpuPercent)
         case .ram:
-            guard viewModel.isCapturing else { return nil }
-            let mb = viewModel.ramMB
+            guard viewModel.recording.isCapturing else { return nil }
+            let mb = viewModel.stats.ramMB
             if mb >= 1024 {
                 return String(format: "RAM %.1fG", mb / 1024)
             }
@@ -144,12 +144,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         // Status info
         let statusText: String
-        if viewModel.isCapturing {
+        if viewModel.recording.isCapturing {
             let parts = [
-                viewModel.captureResolution,
-                String(format: "%.0ffps", viewModel.liveFPS),
-                "Buffer \(String(format: "%.0fs", viewModel.bufferDuration))/\(formatDuration(viewModel.replayDuration))",
-                "\(viewModel.bufferSizeMB)MB"
+                viewModel.stats.captureResolution,
+                String(format: "%.0ffps", viewModel.stats.liveFPS),
+                "Buffer \(String(format: "%.0fs", viewModel.replay.bufferDuration))/\(formatDuration(viewModel.replay.replayDuration))",
+                "\(viewModel.replay.bufferSizeMB)MB"
             ].filter { !$0.isEmpty }
             statusText = parts.joined(separator: " | ")
         } else {
@@ -162,8 +162,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Recording
-        if viewModel.isCapturing {
-            let recTitle = viewModel.isRecording ? "Stop Recording" : "Start Recording"
+        if viewModel.recording.isCapturing {
+            let recTitle = viewModel.recording.isRecording ? "Stop Recording" : "Start Recording"
             let recItem = NSMenuItem(title: recTitle, action: #selector(toggleRecording), keyEquivalent: "r")
             recItem.target = self
             menu.addItem(recItem)
@@ -230,7 +230,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let seconds = Double(sender.tag)
         Task { @MainActor in
             viewModel.engine.saveReplay(lastSeconds: seconds)
-            viewModel.statusMessage = "Saving replay..."
+            viewModel.recording.statusMessage = "Saving replay..."
         }
     }
 

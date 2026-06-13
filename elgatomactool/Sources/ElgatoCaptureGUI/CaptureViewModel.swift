@@ -14,203 +14,32 @@ struct ReplayThumbnail: Identifiable {
     let capturedAt: Date
 }
 
+/// Composition root for the capture UI. Owns the engine + sub-VMs and routes
+/// timer ticks, engine callbacks, NotificationCenter events, and AppSettings
+/// observation into the appropriate sub-VM. Itself has no @Published storage
+/// — views observing only the slice they need (e.g. `vm.stats.liveFPS`) avoid
+/// the 1Hz objectWillChange storm that came from the previous monolith.
 @MainActor
 final class CaptureViewModel: ObservableObject {
 
-    // Device selection
-    @Published var availableDevices: [AVCaptureDevice] = []
-    @Published var selectedDevice: AVCaptureDevice? {
-        didSet {
-            guard selectedDevice?.uniqueID != oldValue?.uniqueID else { return }
-            if let settings, settings.rememberLastDevice {
-                settings.lastDeviceUniqueID = selectedDevice?.uniqueID
-            }
-            // Don't start preview if we're reconnecting capture
-            if reconnectDeviceID == nil && !isReconnecting {
-                startPreviewForSelectedDevice()
-            }
-        }
-    }
+    // MARK: Sub-VMs
+    let stats = StatsVM()
+    let devices = DeviceVM()
+    let replay = ReplayBufferVM()
+    let recording = RecordingVM()
 
-    // State
-    @Published var isPreviewing = false
-    @Published var isCapturing = false
-    @Published var isRecording = false
-    @Published var deviceDisconnected = false
-    @Published var recordingStartDate: Date?
-    @Published var recordingDuration: TimeInterval = 0
-    @Published var screenshotFeedback: ActionFeedback = .idle
-    @Published var replaySaveFeedback: ActionFeedback = .idle
-    @Published var replayThumbnails: [ReplayThumbnail] = []
-    @Published var bufferDuration: Double = 0
-    @Published var bufferFrameCount: Int = 0
-    @Published var bufferSizeMB: Int = 0
-    @Published var liveBitrateMbps: Double = 0
-    @Published var statusMessage: String = ""
-    @Published var errorMessage: String?
-    @Published var cameraAuthorized = false
-    @Published var captureResolution: String = ""
-    @Published var liveFPS: Double = 0
-    @Published var droppedFrames: Int = 0
-    @Published var fpsHistory: [Double] = []
-
-    // Audio device selection
-    @Published var availableAudioDevices: [AVCaptureDevice] = []
-    @Published var selectedAudioDevice: AVCaptureDevice? {
-        didSet {
-            guard selectedAudioDevice?.uniqueID != oldValue?.uniqueID else { return }
-            if let settings, settings.rememberLastDevice {
-                settings.lastAudioDeviceUniqueID = selectedAudioDevice?.uniqueID
-            }
-            engine.setAudioInputDevice(selectedAudioDevice)
-            hasAudio = engine.hasAudioInput
-            audioHistory = []
-        }
-    }
-    @Published var audioPassthroughEnabled: Bool = false {
-        didSet {
-            if audioPassthroughEnabled {
-                engine.startPassthrough()
-            } else {
-                engine.stopPassthrough()
-            }
-        }
-    }
-
-    // Audio levels (linear 0–1)
-    @Published var audioLevel: Double = 0
-    @Published var audioPeakLevel: Double = 0
-    @Published var audioHistory: [Double] = []
-    @Published var hasAudio: Bool = false
-
-    // System stats
-    @Published var cpuPercent: Double = 0
-    @Published var ramMB: Double = 0
-    @Published var diskFreeGB: Double = 0
-    @Published var gpuPercent: Double = 0
-    @Published var cpuHistory: [Double] = []
-    @Published var ramHistory: [Double] = []
-    @Published var diskHistory: [Double] = []
-    @Published var gpuHistory: [Double] = []
-
-    // Settings — synced from AppSettings
-    @Published var replayDuration: Double = 30 {
-        didSet {
-            applyReplayLimits()
-            settings?.replayDuration = replayDuration
-            trimOldThumbnails()
-        }
-    }
-    @Published var customReplayDuration: String = "" // for custom entry
-    @Published var maxReplayRAM: Int = 0 { // bytes, 0 = unlimited
-        didSet {
-            applyReplayLimits()
-            settings?.maxReplayRAM = maxReplayRAM
-        }
-    }
-    @Published var bitrateMbps: Int = 20 {
-        didSet {
-            settings?.bitrateMbps = bitrateMbps
-            engine.updateBitrate(mbps: bitrateMbps)
-        }
-    }
-    @Published var captureCodec: CaptureCodec = .h264 {
-        didSet {
-            guard captureCodec != oldValue else { return }
-            settings?.captureCodec = captureCodec
-            let newCodec = captureCodec
-            // Engine swap is async because it may need to finalize an in-flight
-            // recording before the codec change. Buffer was just (or is about
-            // to be) cleared — also clear the thumbnail strip so the UI doesn't
-            // keep stills around for content that no longer exists.
-            replayThumbnails = []
-            Task { [engine] in
-                await engine.setCodec(newCodec)
-                await MainActor.run { [weak self] in self?.syncState() }
-            }
-        }
-    }
-
+    // MARK: Engine + settings
+    let engine: CaptureEngine
     private weak var settings: AppSettings?
 
-    /// Preset durations in seconds
-    static let replayPresets: [Double] = [15, 30, 60, 90, 120, 180, 300, 600]
-
-    /// RAM cap options in bytes (0 = unlimited)
-    static let ramPresets: [(label: String, bytes: Int)] = [
-        ("Unlimited", 0),
-        ("256 MB", 256 * 1_048_576),
-        ("512 MB", 512 * 1_048_576),
-        ("1 GB", 1024 * 1_048_576),
-        ("2 GB", 2048 * 1_048_576),
-        ("4 GB", 4096 * 1_048_576),
-    ]
-
-    /// Estimated file size in MB for a given duration. Uses the live measured
-    /// bitrate when capture is running (most accurate), falls back to the
-    /// codec's configured/expected bitrate otherwise.
-    func estimatedSizeMB(forSeconds seconds: Double) -> Double {
-        let mbps: Double
-        if liveBitrateMbps > 1.0 {
-            mbps = liveBitrateMbps
-        } else if captureCodec.isLossless {
-            let (w, h, fps) = currentResolutionForEstimate()
-            mbps = captureCodec.estimatedMbps(width: w, height: h, fps: fps)
-        } else {
-            mbps = Double(bitrateMbps)
-        }
-        return mbps * seconds / 8.0
-    }
-
-    /// Best-guess (width, height, fps) for pre-capture file-size estimates.
-    /// Falls back to 1080p60 when no device info is available yet.
-    private func currentResolutionForEstimate() -> (Int, Int, Double) {
-        let parts = captureResolution.split(separator: "x")
-        if parts.count == 2,
-           let w = Int(parts[0]), let h = Int(parts[1]) {
-            return (w, h, liveFPS > 0 ? liveFPS : 60)
-        }
-        return (1920, 1080, 60)
-    }
-
-    /// Human-readable estimated size string.
-    func estimatedSizeLabel(forSeconds seconds: Double) -> String {
-        let mb = estimatedSizeMB(forSeconds: seconds)
-        if mb >= 1024 {
-            return String(format: "~%.1f GB", mb / 1024)
-        }
-        return String(format: "~%.0f MB", mb)
-    }
-
-    /// Maximum duration the chosen RAM cap allows at the current bitrate.
-    func maxDurationForRAMCap() -> Double? {
-        guard maxReplayRAM > 0 else { return nil }
-        let mbps: Double
-        if liveBitrateMbps > 1.0 {
-            mbps = liveBitrateMbps
-        } else if captureCodec.isLossless {
-            let (w, h, fps) = currentResolutionForEstimate()
-            mbps = captureCodec.estimatedMbps(width: w, height: h, fps: fps)
-        } else {
-            mbps = Double(bitrateMbps)
-        }
-        let bytesPerSecond = mbps * 1_000_000 / 8.0
-        guard bytesPerSecond > 0 else { return nil }
-        return Double(maxReplayRAM) / bytesPerSecond
-    }
-
-    private func applyReplayLimits() {
-        engine.updateReplayLimits(duration: replayDuration, maxBytes: maxReplayRAM)
-    }
-
-    let engine: CaptureEngine
-    let systemStats = SystemStatsMonitor()
+    // MARK: Timers + Combine
     private var statusTimer: Timer?
     private var audioMeterTimer: Timer?
     private var thumbnailTimer: Timer?
     private var settingsCancellables: Set<AnyCancellable> = []
     private var appNapActivity: NSObjectProtocol?
 
+    // MARK: Reconnect state machine
     /// UniqueID of the video device we were capturing from before a disconnect.
     private var reconnectDeviceID: String?
     /// UniqueID of the audio device that was selected at disconnect time. Saved
@@ -228,23 +57,44 @@ final class CaptureViewModel: ObservableObject {
     private var zeroFPSStreak: Int = 0
     private static let zeroFPSReconnectThreshold = 3
 
+    /// Preset durations in seconds
+    static let replayPresets: [Double] = [15, 30, 60, 90, 120, 180, 300, 600]
+
+    /// RAM cap options in bytes (0 = unlimited)
+    static let ramPresets: [(label: String, bytes: Int)] = [
+        ("Unlimited", 0),
+        ("256 MB", 256 * 1_048_576),
+        ("512 MB", 512 * 1_048_576),
+        ("1 GB", 1024 * 1_048_576),
+        ("2 GB", 2048 * 1_048_576),
+        ("4 GB", 4096 * 1_048_576),
+    ]
+
     init(settings: AppSettings) {
         self.settings = settings
-        self.replayDuration = settings.replayDuration
-        self.maxReplayRAM = settings.maxReplayRAM
-        self.bitrateMbps = settings.bitrateMbps
-        self.captureCodec = settings.captureCodec
+
+        // Seed sub-VM values from persisted settings BEFORE wiring didSet
+        // callbacks so we don't fire feedback into a half-built engine.
+        replay.replayDuration = settings.replayDuration
+        replay.maxReplayRAM = settings.maxReplayRAM
+        recording.bitrateMbps = settings.bitrateMbps
+        recording.captureCodec = settings.captureCodec
+
         self.engine = CaptureEngine(replayDuration: settings.replayDuration,
                                     bitrateMbps: settings.bitrateMbps,
                                     codec: settings.captureCodec)
         engine.setOutputDirectory(settings.outputDirectory)
+
+        installSubVMCallbacks()
 
         // Mirror codec changes made elsewhere (Preferences sheet) into the VM.
         settings.$captureCodec
             .receive(on: RunLoop.main)
             .sink { [weak self] newCodec in
                 guard let self else { return }
-                if self.captureCodec != newCodec { self.captureCodec = newCodec }
+                if self.recording.captureCodec != newCodec {
+                    self.recording.captureCodec = newCodec
+                }
             }
             .store(in: &settingsCancellables)
 
@@ -281,6 +131,141 @@ final class CaptureViewModel: ObservableObject {
         refreshDevices()
     }
 
+    // MARK: - Sub-VM callback wiring
+
+    private func installSubVMCallbacks() {
+        // Selected video device
+        devices.selectedDeviceChanged = { [weak self] oldDevice, newDevice in
+            guard let self else { return }
+            guard newDevice?.uniqueID != oldDevice?.uniqueID else { return }
+            if let settings = self.settings, settings.rememberLastDevice {
+                settings.lastDeviceUniqueID = newDevice?.uniqueID
+            }
+            // Don't start preview if we're reconnecting capture
+            if self.reconnectDeviceID == nil && !self.isReconnecting {
+                self.startPreviewForSelectedDevice()
+            }
+        }
+
+        // Selected audio device
+        devices.selectedAudioDeviceChanged = { [weak self] oldDevice, newDevice in
+            guard let self else { return }
+            guard newDevice?.uniqueID != oldDevice?.uniqueID else { return }
+            if let settings = self.settings, settings.rememberLastDevice {
+                settings.lastAudioDeviceUniqueID = newDevice?.uniqueID
+            }
+            self.engine.setAudioInputDevice(newDevice)
+            self.stats.hasAudio = self.engine.hasAudioInput
+            self.stats.audioHistory = []
+        }
+
+        // Audio passthrough toggle
+        devices.audioPassthroughChanged = { [weak self] enabled in
+            guard let self else { return }
+            if enabled {
+                self.engine.startPassthrough()
+            } else {
+                self.engine.stopPassthrough()
+            }
+        }
+
+        // Replay duration
+        replay.replayDurationChanged = { [weak self] newValue in
+            guard let self else { return }
+            self.applyReplayLimits()
+            self.settings?.replayDuration = newValue
+            self.trimOldThumbnails()
+        }
+
+        // Replay RAM cap
+        replay.maxReplayRAMChanged = { [weak self] newValue in
+            guard let self else { return }
+            self.applyReplayLimits()
+            self.settings?.maxReplayRAM = newValue
+        }
+
+        // Bitrate
+        recording.bitrateChanged = { [weak self] newValue in
+            guard let self else { return }
+            self.settings?.bitrateMbps = newValue
+            self.engine.updateBitrate(mbps: newValue)
+        }
+
+        // Codec
+        recording.captureCodecChanged = { [weak self] newCodec in
+            guard let self else { return }
+            self.settings?.captureCodec = newCodec
+            // Engine swap is async because it may need to finalize an in-flight
+            // recording before the codec change. Buffer was just (or is about
+            // to be) cleared — also clear the thumbnail strip so the UI doesn't
+            // keep stills around for content that no longer exists.
+            self.replay.replayThumbnails = []
+            Task { [engine = self.engine] in
+                await engine.setCodec(newCodec)
+                await MainActor.run { [weak self] in self?.syncState() }
+            }
+        }
+    }
+
+    // MARK: - Estimates
+
+    /// Estimated file size in MB for a given duration. Uses the live measured
+    /// bitrate when capture is running (most accurate), falls back to the
+    /// codec's configured/expected bitrate otherwise.
+    func estimatedSizeMB(forSeconds seconds: Double) -> Double {
+        let mbps: Double
+        if stats.liveBitrateMbps > 1.0 {
+            mbps = stats.liveBitrateMbps
+        } else if recording.captureCodec.isLossless {
+            let (w, h, fps) = currentResolutionForEstimate()
+            mbps = recording.captureCodec.estimatedMbps(width: w, height: h, fps: fps)
+        } else {
+            mbps = Double(recording.bitrateMbps)
+        }
+        return mbps * seconds / 8.0
+    }
+
+    /// Best-guess (width, height, fps) for pre-capture file-size estimates.
+    /// Falls back to 1080p60 when no device info is available yet.
+    private func currentResolutionForEstimate() -> (Int, Int, Double) {
+        let parts = stats.captureResolution.split(separator: "x")
+        if parts.count == 2,
+           let w = Int(parts[0]), let h = Int(parts[1]) {
+            return (w, h, stats.liveFPS > 0 ? stats.liveFPS : 60)
+        }
+        return (1920, 1080, 60)
+    }
+
+    /// Human-readable estimated size string.
+    func estimatedSizeLabel(forSeconds seconds: Double) -> String {
+        let mb = estimatedSizeMB(forSeconds: seconds)
+        if mb >= 1024 {
+            return String(format: "~%.1f GB", mb / 1024)
+        }
+        return String(format: "~%.0f MB", mb)
+    }
+
+    /// Maximum duration the chosen RAM cap allows at the current bitrate.
+    func maxDurationForRAMCap() -> Double? {
+        guard replay.maxReplayRAM > 0 else { return nil }
+        let mbps: Double
+        if stats.liveBitrateMbps > 1.0 {
+            mbps = stats.liveBitrateMbps
+        } else if recording.captureCodec.isLossless {
+            let (w, h, fps) = currentResolutionForEstimate()
+            mbps = recording.captureCodec.estimatedMbps(width: w, height: h, fps: fps)
+        } else {
+            mbps = Double(recording.bitrateMbps)
+        }
+        let bytesPerSecond = mbps * 1_000_000 / 8.0
+        guard bytesPerSecond > 0 else { return nil }
+        return Double(replay.maxReplayRAM) / bytesPerSecond
+    }
+
+    private func applyReplayLimits() {
+        engine.updateReplayLimits(duration: replay.replayDuration, maxBytes: replay.maxReplayRAM)
+    }
+
     /// Try to reconnect to the last-used device and optionally start capture.
     func autoConnectLastDevice() {
         guard let settings, settings.rememberLastDevice,
@@ -288,8 +273,8 @@ final class CaptureViewModel: ObservableObject {
 
         refreshDevices()
 
-        if let match = availableDevices.first(where: { $0.uniqueID == savedID }) {
-            selectedDevice = match
+        if let match = devices.availableDevices.first(where: { $0.uniqueID == savedID }) {
+            devices.selectedDevice = match
             if settings.autoStartCapture {
                 startCapture()
             }
@@ -301,21 +286,21 @@ final class CaptureViewModel: ObservableObject {
     func checkCameraAccess() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            cameraAuthorized = true
+            devices.cameraAuthorized = true
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 Task { @MainActor in
-                    self.cameraAuthorized = granted
+                    self.devices.cameraAuthorized = granted
                     if granted {
                         self.refreshDevices()
                     } else {
-                        self.errorMessage = "Camera access denied. Grant access in System Settings > Privacy & Security > Camera."
+                        self.recording.errorMessage = "Camera access denied. Grant access in System Settings > Privacy & Security > Camera."
                     }
                 }
             }
         case .denied, .restricted:
-            cameraAuthorized = false
-            errorMessage = "Camera access denied. Grant access in System Settings > Privacy & Security > Camera."
+            devices.cameraAuthorized = false
+            recording.errorMessage = "Camera access denied. Grant access in System Settings > Privacy & Security > Camera."
         @unknown default:
             break
         }
@@ -324,26 +309,26 @@ final class CaptureViewModel: ObservableObject {
     // MARK: - Device management
 
     func refreshDevices() {
-        availableDevices = DeviceDiscovery.findCaptureDevices()
-        availableAudioDevices = DeviceDiscovery.findAudioDevices()
+        devices.availableDevices = DeviceDiscovery.findCaptureDevices()
+        devices.availableAudioDevices = DeviceDiscovery.findAudioDevices()
 
         // Don't change selection while waiting for a device to come back
         if reconnectDeviceID == nil,
-           selectedDevice == nil || !availableDevices.contains(where: { $0.uniqueID == selectedDevice?.uniqueID }) {
-            selectedDevice = autoSelectDevice()
+           devices.selectedDevice == nil || !devices.availableDevices.contains(where: { $0.uniqueID == devices.selectedDevice?.uniqueID }) {
+            devices.selectedDevice = autoSelectDevice()
         }
 
         // Auto-select audio device matching video device name if none selected
-        if selectedAudioDevice == nil || !availableAudioDevices.contains(where: { $0.uniqueID == selectedAudioDevice?.uniqueID }) {
-            selectedAudioDevice = autoSelectAudioDevice()
+        if devices.selectedAudioDevice == nil || !devices.availableAudioDevices.contains(where: { $0.uniqueID == devices.selectedAudioDevice?.uniqueID }) {
+            devices.selectedAudioDevice = autoSelectAudioDevice()
         }
 
-        if availableDevices.isEmpty {
-            statusMessage = "No capture devices found. Plug in your Elgato and refresh."
+        if devices.availableDevices.isEmpty {
+            recording.statusMessage = "No capture devices found. Plug in your Elgato and refresh."
         }
 
         // Start preview if we have a device and aren't already capturing
-        if selectedDevice != nil && !isCapturing && !isPreviewing {
+        if devices.selectedDevice != nil && !recording.isCapturing && !recording.isPreviewing {
             startPreviewForSelectedDevice()
         }
     }
@@ -352,22 +337,22 @@ final class CaptureViewModel: ObservableObject {
         // Prefer the remembered audio device
         if let settings, settings.rememberLastDevice,
            let savedID = settings.lastAudioDeviceUniqueID,
-           let match = availableAudioDevices.first(where: { $0.uniqueID == savedID }) {
+           let match = devices.availableAudioDevices.first(where: { $0.uniqueID == savedID }) {
             return match
         }
 
-        guard let videoDevice = selectedDevice else { return nil }
+        guard let videoDevice = devices.selectedDevice else { return nil }
         let videoName = videoDevice.localizedName.lowercased()
 
         // Exact name match
-        if let match = availableAudioDevices.first(where: {
+        if let match = devices.availableAudioDevices.first(where: {
             $0.localizedName == videoDevice.localizedName
         }) {
             return match
         }
 
         // Partial name match (e.g. "Cam Link 4K" in audio device name)
-        return availableAudioDevices.first(where: {
+        return devices.availableAudioDevices.first(where: {
             let audioName = $0.localizedName.lowercased()
             return audioName.contains(videoName) || videoName.contains(audioName)
         })
@@ -393,104 +378,104 @@ final class CaptureViewModel: ObservableObject {
     /// to avoid feeding it a stale reference.
     @discardableResult
     private func refreshSelectedAudioDevice() -> AVCaptureDevice? {
-        availableAudioDevices = DeviceDiscovery.findAudioDevices()
-        guard let id = selectedAudioDevice?.uniqueID else { return nil }
-        let fresh = availableAudioDevices.first(where: { $0.uniqueID == id })
-        if let fresh, fresh !== selectedAudioDevice {
-            selectedAudioDevice = fresh
+        devices.availableAudioDevices = DeviceDiscovery.findAudioDevices()
+        guard let id = devices.selectedAudioDevice?.uniqueID else { return nil }
+        let fresh = devices.availableAudioDevices.first(where: { $0.uniqueID == id })
+        if let fresh, fresh !== devices.selectedAudioDevice {
+            devices.selectedAudioDevice = fresh
         }
         return fresh
     }
 
     private func autoSelectDevice() -> AVCaptureDevice? {
         let keywords = ["elgato", "cam link", "hd60", "4k60", "game capture"]
-        if let match = availableDevices.first(where: { device in
+        if let match = devices.availableDevices.first(where: { device in
             let name = device.localizedName.lowercased()
             return keywords.contains(where: { name.contains($0) })
         }) {
             return match
         }
-        return availableDevices.first
+        return devices.availableDevices.first
     }
 
     // MARK: - Preview
 
     func startPreviewForSelectedDevice() {
-        guard cameraAuthorized, let device = selectedDevice else { return }
+        guard devices.cameraAuthorized, let device = devices.selectedDevice else { return }
         // Don't interrupt a running capture
-        guard !isCapturing else { return }
+        guard !recording.isCapturing else { return }
 
         do {
             try engine.startPreview(with: device)
-            isPreviewing = true
+            recording.isPreviewing = true
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-            captureResolution = "\(dims.width)x\(dims.height)"
+            stats.captureResolution = "\(dims.width)x\(dims.height)"
 
             // Set up audio — always re-resolve by uniqueID against a fresh
             // discovery session to avoid stale AVCaptureDevice refs.
             if let audioDevice = refreshSelectedAudioDevice() {
                 engine.setAudioInputDevice(audioDevice)
-                hasAudio = engine.hasAudioInput
-                if hasAudio { startAudioMeterTimer() }
+                stats.hasAudio = engine.hasAudioInput
+                if stats.hasAudio { startAudioMeterTimer() }
             } else {
-                hasAudio = false
+                stats.hasAudio = false
             }
         } catch {
             print("[GUI] Preview failed: \(error)")
-            isPreviewing = false
+            recording.isPreviewing = false
         }
     }
 
     func stopPreview() {
         engine.stopPreview()
-        isPreviewing = false
-        captureResolution = ""
-        hasAudio = false
+        recording.isPreviewing = false
+        stats.captureResolution = ""
+        stats.hasAudio = false
         stopAudioMeterTimer()
     }
 
     // MARK: - Capture control
 
     func startCapture() {
-        guard cameraAuthorized else {
-            errorMessage = "Camera access not granted. Check System Settings > Privacy & Security > Camera."
+        guard devices.cameraAuthorized else {
+            recording.errorMessage = "Camera access not granted. Check System Settings > Privacy & Security > Camera."
             return
         }
 
-        guard let device = selectedDevice else {
-            errorMessage = "No device selected"
+        guard let device = devices.selectedDevice else {
+            recording.errorMessage = "No device selected"
             return
         }
 
-        errorMessage = nil
-        statusMessage = "Starting capture..."
+        recording.errorMessage = nil
+        recording.statusMessage = "Starting capture..."
 
         do {
             try engine.start(with: device)
-            isCapturing = true
-            errorMessage = nil
-            statusMessage = "Capturing from \(device.localizedName)"
+            recording.isCapturing = true
+            recording.errorMessage = nil
+            recording.statusMessage = "Capturing from \(device.localizedName)"
 
             // Read resolution from the device's active format
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-            captureResolution = "\(dims.width)x\(dims.height)"
+            stats.captureResolution = "\(dims.width)x\(dims.height)"
 
             // Set up audio — refresh the device ref against a fresh discovery
             // session first so we don't pass a stale handle into the session.
             stopAudioMeterTimer()
             if let audioDevice = refreshSelectedAudioDevice() {
                 engine.setAudioInputDevice(audioDevice)
-                hasAudio = engine.hasAudioInput
+                stats.hasAudio = engine.hasAudioInput
             } else {
-                hasAudio = false
+                stats.hasAudio = false
             }
 
             startStatusTimer()
             startThumbnailTimer()
         } catch {
-            errorMessage = error.localizedDescription
-            isCapturing = false
-            statusMessage = ""
+            recording.errorMessage = error.localizedDescription
+            recording.isCapturing = false
+            recording.statusMessage = ""
             print("[GUI] Start failed: \(error)")
         }
     }
@@ -504,32 +489,32 @@ final class CaptureViewModel: ObservableObject {
         wasCapturingAtDisconnect = false
 
         engine.stop()
-        isCapturing = false
-        deviceDisconnected = false
+        recording.isCapturing = false
+        devices.deviceDisconnected = false
         // engine.stop() falls back to preview mode automatically
-        isPreviewing = engine.isPreviewing
+        recording.isPreviewing = engine.isPreviewing
         stopStatusTimer()
         stopThumbnailTimer()
-        replayThumbnails = []
-        statusMessage = "Stopped"
-        liveFPS = 0
-        droppedFrames = 0
-        fpsHistory = []
-        recordingStartDate = nil
-        recordingDuration = 0
-        audioLevel = 0
-        audioPeakLevel = 0
-        audioHistory = []
-        hasAudio = false
-        audioPassthroughEnabled = false
+        replay.replayThumbnails = []
+        recording.statusMessage = "Stopped"
+        stats.liveFPS = 0
+        stats.droppedFrames = 0
+        stats.fpsHistory = []
+        recording.recordingStartDate = nil
+        recording.recordingDuration = 0
+        stats.audioLevel = 0
+        stats.audioPeakLevel = 0
+        stats.audioHistory = []
+        stats.hasAudio = false
+        devices.audioPassthroughEnabled = false
         syncState()
 
         // Update resolution from the still-connected device
-        if isPreviewing, let device = selectedDevice {
+        if recording.isPreviewing, let device = devices.selectedDevice {
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-            captureResolution = "\(dims.width)x\(dims.height)"
+            stats.captureResolution = "\(dims.width)x\(dims.height)"
         } else {
-            captureResolution = ""
+            stats.captureResolution = ""
         }
     }
 
@@ -538,21 +523,21 @@ final class CaptureViewModel: ObservableObject {
     func toggleRecording() {
         let wasRecording = engine.recorder.isRecording
         if wasRecording {
-            statusMessage = "Stopping recording..."
+            recording.statusMessage = "Stopping recording..."
         } else {
-            statusMessage = "Starting recording..."
+            recording.statusMessage = "Starting recording..."
         }
         Task.detached { [weak self] in
             self?.engine.toggleRecording()
             await MainActor.run {
                 guard let self else { return }
                 if wasRecording {
-                    self.recordingStartDate = nil
-                    self.recordingDuration = 0
-                    self.statusMessage = "Recording stopped"
+                    self.recording.recordingStartDate = nil
+                    self.recording.recordingDuration = 0
+                    self.recording.statusMessage = "Recording stopped"
                 } else {
-                    self.recordingStartDate = Date()
-                    self.statusMessage = "Recording started"
+                    self.recording.recordingStartDate = Date()
+                    self.recording.statusMessage = "Recording started"
                 }
                 self.syncState()
             }
@@ -560,28 +545,28 @@ final class CaptureViewModel: ObservableObject {
     }
 
     func takeScreenshot() {
-        screenshotFeedback = .inProgress
-        statusMessage = "Saving screenshot..."
+        replay.screenshotFeedback = .inProgress
+        recording.statusMessage = "Saving screenshot..."
         Task.detached { [weak self] in
             self?.engine.takeScreenshot()
             await MainActor.run {
                 guard let self else { return }
-                self.screenshotFeedback = .success
-                self.statusMessage = "Screenshot saved"
-                self.clearFeedbackAfterDelay(\.screenshotFeedback)
+                self.replay.screenshotFeedback = .success
+                self.recording.statusMessage = "Screenshot saved"
+                self.clearScreenshotFeedbackAfterDelay()
                 self.clearStatusAfterDelay()
             }
         }
     }
 
     func saveReplay() {
-        replaySaveFeedback = .inProgress
-        statusMessage = "Saving replay..."
-        engine.saveReplay(lastSeconds: replayDuration) { [weak self] success in
+        replay.replaySaveFeedback = .inProgress
+        recording.statusMessage = "Saving replay..."
+        engine.saveReplay(lastSeconds: replay.replayDuration) { [weak self] success in
             guard let self else { return }
-            self.replaySaveFeedback = success ? .success : .failed
-            self.statusMessage = success ? "Replay saved" : "Replay save failed"
-            self.clearFeedbackAfterDelay(\.replaySaveFeedback)
+            self.replay.replaySaveFeedback = success ? .success : .failed
+            self.recording.statusMessage = success ? "Replay saved" : "Replay save failed"
+            self.clearReplaySaveFeedbackAfterDelay()
         }
     }
 
@@ -594,45 +579,45 @@ final class CaptureViewModel: ObservableObject {
     // MARK: - Private
 
     private func syncState() {
-        isRecording = engine.recorder.isRecording
-        if let start = recordingStartDate, isRecording {
-            recordingDuration = Date().timeIntervalSince(start)
+        recording.isRecording = engine.recorder.isRecording
+        if let start = recording.recordingStartDate, recording.isRecording {
+            recording.recordingDuration = Date().timeIntervalSince(start)
         }
-        let stats = engine.replayBuffer.stats
-        bufferDuration = stats.duration
-        bufferFrameCount = stats.frameCount
-        bufferSizeMB = stats.bytes / 1_048_576
-        liveBitrateMbps = engine.liveBitrateMbps
+        let bufStats = engine.replayBuffer.stats
+        replay.bufferDuration = bufStats.duration
+        replay.bufferFrameCount = bufStats.frameCount
+        replay.bufferSizeMB = bufStats.bytes / 1_048_576
+        stats.liveBitrateMbps = engine.liveBitrateMbps
 
         engine.sampleFPS()
-        liveFPS = engine.liveFPS
-        droppedFrames = engine.droppedFrames
-        fpsHistory.append(liveFPS)
-        if fpsHistory.count > 60 { fpsHistory.removeFirst(fpsHistory.count - 60) }
+        stats.liveFPS = engine.liveFPS
+        stats.droppedFrames = engine.droppedFrames
+        stats.fpsHistory.append(stats.liveFPS)
+        if stats.fpsHistory.count > 60 { stats.fpsHistory.removeFirst(stats.fpsHistory.count - 60) }
 
         // Audio levels
-        hasAudio = engine.hasAudioInput
-        if hasAudio {
+        stats.hasAudio = engine.hasAudioInput
+        if stats.hasAudio {
             let levels = engine.sampleAudioLevels()
-            audioLevel = Double(levels.rms)
-            audioPeakLevel = Double(levels.peak)
+            stats.audioLevel = Double(levels.rms)
+            stats.audioPeakLevel = Double(levels.peak)
             // Store peak in dB for the history graph (clamped to -60…0)
             let peakDB = levels.peak > 0 ? max(20 * log10(levels.peak), -60) : -60
-            audioHistory.append(Double(peakDB))
-            if audioHistory.count > 120 { audioHistory.removeFirst(audioHistory.count - 120) }
+            stats.audioHistory.append(Double(peakDB))
+            if stats.audioHistory.count > 120 { stats.audioHistory.removeFirst(stats.audioHistory.count - 120) }
         }
 
         checkForStall()
 
-        systemStats.sample()
-        cpuPercent = systemStats.latestCPU
-        ramMB = systemStats.latestRAM
-        diskFreeGB = systemStats.latestDisk
-        gpuPercent = systemStats.latestGPU
-        cpuHistory = systemStats.cpuHistory
-        ramHistory = systemStats.ramHistory
-        diskHistory = systemStats.diskHistory
-        gpuHistory = systemStats.gpuHistory
+        stats.systemStats.sample()
+        stats.cpuPercent = stats.systemStats.latestCPU
+        stats.ramMB = stats.systemStats.latestRAM
+        stats.diskFreeGB = stats.systemStats.latestDisk
+        stats.gpuPercent = stats.systemStats.latestGPU
+        stats.cpuHistory = stats.systemStats.cpuHistory
+        stats.ramHistory = stats.systemStats.ramHistory
+        stats.diskHistory = stats.systemStats.diskHistory
+        stats.gpuHistory = stats.systemStats.gpuHistory
     }
 
     private func startStatusTimer() {
@@ -680,13 +665,13 @@ final class CaptureViewModel: ObservableObject {
     }
 
     private func sampleAudioOnly() {
-        guard hasAudio else { return }
+        guard stats.hasAudio else { return }
         let levels = engine.sampleAudioLevels()
-        audioLevel = Double(levels.rms)
-        audioPeakLevel = Double(levels.peak)
+        stats.audioLevel = Double(levels.rms)
+        stats.audioPeakLevel = Double(levels.peak)
         let peakDB = levels.peak > 0 ? max(20 * log10(levels.peak), -60) : -60
-        audioHistory.append(Double(peakDB))
-        if audioHistory.count > 120 { audioHistory.removeFirst(audioHistory.count - 120) }
+        stats.audioHistory.append(Double(peakDB))
+        if stats.audioHistory.count > 120 { stats.audioHistory.removeFirst(stats.audioHistory.count - 120) }
     }
 
     // MARK: - Device reconnection
@@ -695,8 +680,8 @@ final class CaptureViewModel: ObservableObject {
         guard let device = notification.object as? AVCaptureDevice else { return }
         print("[GUI] Device disconnected: \(device.localizedName) (\(device.uniqueID))")
 
-        let wasOurVideoDevice = device.uniqueID == selectedDevice?.uniqueID
-        let wasOurAudioDevice = device.uniqueID == selectedAudioDevice?.uniqueID
+        let wasOurVideoDevice = device.uniqueID == devices.selectedDevice?.uniqueID
+        let wasOurAudioDevice = device.uniqueID == devices.selectedAudioDevice?.uniqueID
 
         // The audio half of a USB capture device disconnects with its own
         // uniqueID. Save the ID up front so reconnect can re-resolve it; without
@@ -714,18 +699,18 @@ final class CaptureViewModel: ObservableObject {
             // sit on a stale input. The reconnect handler will re-attach when
             // the audio device returns.
             engine.setAudioInputDevice(nil)
-            hasAudio = false
-            availableAudioDevices = DeviceDiscovery.findAudioDevices()
+            stats.hasAudio = false
+            devices.availableAudioDevices = DeviceDiscovery.findAudioDevices()
             // Start the reconnect machinery anchored on the video device if any
             // — otherwise the next AVCaptureDeviceWasConnected for the audio
             // half can be handled by attemptReconnect via the polling loop.
-            if let videoID = selectedDevice?.uniqueID,
+            if let videoID = devices.selectedDevice?.uniqueID,
                reconnectDeviceID == nil {
                 beginReconnect(forVideoID: videoID)
             }
         } else {
-            availableDevices = DeviceDiscovery.findCaptureDevices()
-            availableAudioDevices = DeviceDiscovery.findAudioDevices()
+            devices.availableDevices = DeviceDiscovery.findCaptureDevices()
+            devices.availableAudioDevices = DeviceDiscovery.findAudioDevices()
         }
     }
 
@@ -735,25 +720,25 @@ final class CaptureViewModel: ObservableObject {
         // uniqueID so we can re-resolve it on reconnect even if its disconnect
         // notification hasn't fired yet.
         if reconnectAudioDeviceID == nil,
-           let audioID = selectedAudioDevice?.uniqueID {
+           let audioID = devices.selectedAudioDevice?.uniqueID {
             reconnectAudioDeviceID = audioID
         }
 
-        wasCapturingAtDisconnect = isCapturing
+        wasCapturingAtDisconnect = recording.isCapturing
         reconnectDeviceID = videoID
 
         // Tear the pipeline down completely. The replay buffer is NOT cleared,
         // so already-captured frames survive for a manual save.
-        if isCapturing || isPreviewing {
+        if recording.isCapturing || recording.isPreviewing {
             engine.stop()
             engine.stopPreview()
             stopStatusTimer()
         }
 
         stopThumbnailTimer()
-        deviceDisconnected = true
-        statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
-        errorMessage = nil
+        devices.deviceDisconnected = true
+        recording.statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
+        recording.errorMessage = nil
 
         // Don't wait for AVCaptureDeviceWasConnected — those notifications can
         // arrive before the device is enumerable in DiscoverySession (or be
@@ -781,7 +766,7 @@ final class CaptureViewModel: ObservableObject {
 
     private func attemptReconnect(deviceID: String, delay: Double) {
         isReconnecting = true
-        statusMessage = "Reconnecting..."
+        recording.statusMessage = "Reconnecting..."
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
@@ -793,10 +778,10 @@ final class CaptureViewModel: ObservableObject {
 
             // Refresh both device lists. AVFoundation can take a beat to publish
             // a re-plugged device, so each iteration looks fresh.
-            self.availableDevices = DeviceDiscovery.findCaptureDevices()
-            self.availableAudioDevices = DeviceDiscovery.findAudioDevices()
+            self.devices.availableDevices = DeviceDiscovery.findCaptureDevices()
+            self.devices.availableAudioDevices = DeviceDiscovery.findAudioDevices()
 
-            guard let fresh = self.availableDevices.first(where: { $0.uniqueID == deviceID }) else {
+            guard let fresh = self.devices.availableDevices.first(where: { $0.uniqueID == deviceID }) else {
                 // Device not enumerable yet — keep polling.
                 self.attemptReconnect(deviceID: deviceID, delay: 0.5)
                 return
@@ -804,27 +789,27 @@ final class CaptureViewModel: ObservableObject {
 
             // selectedDevice's didSet skips when uniqueID matches, which is what
             // we want — no preview-restart side effect during reconnect.
-            self.selectedDevice = fresh
+            self.devices.selectedDevice = fresh
 
             do {
                 if self.wasCapturingAtDisconnect {
                     try self.engine.start(with: fresh)
-                    self.isCapturing = true
+                    self.recording.isCapturing = true
                     self.startStatusTimer()
                     self.startThumbnailTimer()
                 } else {
                     try self.engine.startPreview(with: fresh)
-                    self.isPreviewing = true
+                    self.recording.isPreviewing = true
                 }
                 self.reconnectDeviceID = nil
                 self.isReconnecting = false
-                self.deviceDisconnected = false
-                self.errorMessage = nil
-                self.statusMessage = self.wasCapturingAtDisconnect
+                self.devices.deviceDisconnected = false
+                self.recording.errorMessage = nil
+                self.recording.statusMessage = self.wasCapturingAtDisconnect
                     ? "Capturing from \(fresh.localizedName)"
                     : "Preview from \(fresh.localizedName)"
                 let dims = CMVideoFormatDescriptionGetDimensions(fresh.activeFormat.formatDescription)
-                self.captureResolution = "\(dims.width)x\(dims.height)"
+                self.stats.captureResolution = "\(dims.width)x\(dims.height)"
 
                 // Re-attach audio using a FRESHLY resolved AVCaptureDevice. The
                 // pre-disconnect reference is invalid post-replug — passing it
@@ -832,7 +817,7 @@ final class CaptureViewModel: ObservableObject {
                 // flat (that's the "audio dies after reconnect" bug).
                 self.reattachAudioAfterReconnect()
                 self.wasCapturingAtDisconnect = false
-                print("[GUI] Reconnected successfully (audio: \(self.hasAudio ? "yes" : "no"))")
+                print("[GUI] Reconnected successfully (audio: \(self.stats.hasAudio ? "yes" : "no"))")
             } catch {
                 print("[GUI] Reconnect attempt failed: \(error) — retrying")
                 self.attemptReconnect(deviceID: deviceID, delay: 0.5)
@@ -844,9 +829,9 @@ final class CaptureViewModel: ObservableObject {
     /// re-attach it. Falls back to `selectedAudioDevice`'s uniqueID for setups
     /// where audio was selected but never disconnected.
     private func reattachAudioAfterReconnect() {
-        let targetID = reconnectAudioDeviceID ?? selectedAudioDevice?.uniqueID
+        let targetID = reconnectAudioDeviceID ?? devices.selectedAudioDevice?.uniqueID
         guard let targetID else {
-            hasAudio = false
+            stats.hasAudio = false
             return
         }
 
@@ -854,11 +839,11 @@ final class CaptureViewModel: ObservableObject {
             // Update the stored ref so it points at the fresh instance. didSet
             // skips re-firing because uniqueID is unchanged — we drive the
             // engine call explicitly below.
-            if fresh !== selectedAudioDevice {
-                selectedAudioDevice = fresh
+            if fresh !== devices.selectedAudioDevice {
+                devices.selectedAudioDevice = fresh
             }
             let ok = engine.setAudioInputDevice(fresh)
-            hasAudio = ok && engine.hasAudioInput
+            stats.hasAudio = ok && engine.hasAudioInput
             if !ok {
                 print("[GUI] Audio re-attach failed — device may still be settling")
             }
@@ -866,19 +851,19 @@ final class CaptureViewModel: ObservableObject {
         } else {
             // Audio device not enumerable yet. Don't lose the ID — leave it set
             // so the user can retry, and report no audio for now.
-            hasAudio = false
+            stats.hasAudio = false
             print("[GUI] Audio device \(targetID) not yet available post-reconnect")
         }
     }
 
     /// Detect capture stalls (0 FPS for several seconds) and attempt recovery.
     private func checkForStall() {
-        guard isCapturing else {
+        guard recording.isCapturing else {
             zeroFPSStreak = 0
             return
         }
 
-        if liveFPS == 0 {
+        if stats.liveFPS == 0 {
             zeroFPSStreak += 1
         } else {
             zeroFPSStreak = 0
@@ -889,44 +874,54 @@ final class CaptureViewModel: ObservableObject {
         zeroFPSStreak = 0
 
         print("[GUI] Capture stall detected (\(Self.zeroFPSReconnectThreshold)s at 0fps) — attempting recovery")
-        statusMessage = "Capture stalled — reconnecting..."
+        recording.statusMessage = "Capture stalled — reconnecting..."
 
-        guard let device = selectedDevice else { return }
+        guard let device = devices.selectedDevice else { return }
         let deviceID = device.uniqueID
 
         // Stop and restart
         engine.stop()
-        isCapturing = false
-        isPreviewing = false
+        recording.isCapturing = false
+        recording.isPreviewing = false
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
             self.refreshDevices()
-            if let match = self.availableDevices.first(where: { $0.uniqueID == deviceID }) {
-                self.selectedDevice = match
+            if let match = self.devices.availableDevices.first(where: { $0.uniqueID == deviceID }) {
+                self.devices.selectedDevice = match
                 self.startCapture()
             } else {
                 // Device not found — enter reconnect wait mode
                 self.reconnectDeviceID = deviceID
-                self.statusMessage = "Device lost — waiting to reconnect..."
+                self.recording.statusMessage = "Device lost — waiting to reconnect..."
             }
         }
     }
 
     private func clearStatusAfterDelay() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            if self?.statusMessage == "Screenshot saved" {
-                self?.statusMessage = ""
+            if self?.recording.statusMessage == "Screenshot saved" {
+                self?.recording.statusMessage = ""
             }
         }
     }
 
-    private func clearFeedbackAfterDelay(_ keyPath: ReferenceWritableKeyPath<CaptureViewModel, ActionFeedback>) {
+    private func clearScreenshotFeedbackAfterDelay() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
-            let current = self[keyPath: keyPath]
+            let current = self.replay.screenshotFeedback
             if current == .success || current == .failed {
-                self[keyPath: keyPath] = .idle
+                self.replay.screenshotFeedback = .idle
+            }
+        }
+    }
+
+    private func clearReplaySaveFeedbackAfterDelay() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            let current = self.replay.replaySaveFeedback
+            if current == .success || current == .failed {
+                self.replay.replaySaveFeedback = .idle
             }
         }
     }
@@ -955,21 +950,21 @@ final class CaptureViewModel: ObservableObject {
 
     private func captureThumbnail() {
         let engine = self.engine
-        let maxDuration = self.replayDuration
+        let maxDuration = self.replay.replayDuration
         Task.detached {
             guard let cgImage = engine.createThumbnail(maxWidth: 160) else { return }
             let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.replayThumbnails.append(ReplayThumbnail(image: nsImage, capturedAt: Date()))
+                self.replay.replayThumbnails.append(ReplayThumbnail(image: nsImage, capturedAt: Date()))
                 let cutoff = Date().addingTimeInterval(-maxDuration)
-                self.replayThumbnails.removeAll { $0.capturedAt < cutoff }
+                self.replay.replayThumbnails.removeAll { $0.capturedAt < cutoff }
             }
         }
     }
 
     private func trimOldThumbnails() {
-        let cutoff = Date().addingTimeInterval(-replayDuration)
-        replayThumbnails.removeAll { $0.capturedAt < cutoff }
+        let cutoff = Date().addingTimeInterval(-replay.replayDuration)
+        replay.replayThumbnails.removeAll { $0.capturedAt < cutoff }
     }
 }
