@@ -60,6 +60,7 @@ final class AppSettings: ObservableObject {
         static let replayDuration = "replayDuration"
         static let maxReplayRAM = "maxReplayRAM"
         static let bitrateMbps = "bitrateMbps"
+        static let captureCodec = "captureCodec"
         static let outputDirectoryPath = "outputDirectoryPath"
         static let statusBarFields = "statusBarFields"
         static let overlayStats = "overlayStats"
@@ -99,6 +100,10 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(bitrateMbps, forKey: Keys.bitrateMbps) }
     }
 
+    @Published var captureCodec: CaptureCodec {
+        didSet { defaults.set(captureCodec.rawValue, forKey: Keys.captureCodec) }
+    }
+
     @Published var outputDirectoryPath: String? {
         didSet { defaults.set(outputDirectoryPath, forKey: Keys.outputDirectoryPath) }
     }
@@ -129,6 +134,12 @@ final class AppSettings: ObservableObject {
         self.replayDuration = defaults.object(forKey: Keys.replayDuration) as? Double ?? 30
         self.maxReplayRAM = defaults.object(forKey: Keys.maxReplayRAM) as? Int ?? 0
         self.bitrateMbps = defaults.object(forKey: Keys.bitrateMbps) as? Int ?? 20
+        if let raw = defaults.string(forKey: Keys.captureCodec),
+           let codec = CaptureCodec(rawValue: raw) {
+            self.captureCodec = codec
+        } else {
+            self.captureCodec = .h264
+        }
         self.outputDirectoryPath = defaults.string(forKey: Keys.outputDirectoryPath)
 
         if let saved = defaults.stringArray(forKey: Keys.statusBarFields) {

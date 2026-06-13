@@ -118,10 +118,16 @@ final class CaptureViewModel: ObservableObject {
         didSet {
             guard captureCodec != oldValue else { return }
             settings?.captureCodec = captureCodec
-            engine.setCodec(captureCodec)
-            // Buffer was just cleared — also clear the thumbnail strip so the
-            // UI doesn't keep stills around for content that no longer exists.
+            let newCodec = captureCodec
+            // Engine swap is async because it may need to finalize an in-flight
+            // recording before the codec change. Buffer was just (or is about
+            // to be) cleared — also clear the thumbnail strip so the UI doesn't
+            // keep stills around for content that no longer exists.
             replayThumbnails = []
+            Task { [engine] in
+                await engine.setCodec(newCodec)
+                await MainActor.run { [weak self] in self?.syncState() }
+            }
         }
     }
 

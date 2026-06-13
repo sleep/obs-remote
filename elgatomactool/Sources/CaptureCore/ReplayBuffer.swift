@@ -34,6 +34,17 @@ public final class ReplayBuffer {
         trimLocked()
     }
 
+    /// Drop every buffered frame + audio sample. Called when the codec changes
+    /// — mixed-codec frames can't be muxed into a single output file.
+    public func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        frames.removeAll(keepingCapacity: true)
+        audioSamples.removeAll(keepingCapacity: true)
+        totalBytes = 0
+        audioBytes = 0
+    }
+
     public func appendAudio(_ sample: AudioSample) {
         lock.lock()
         defer { lock.unlock() }

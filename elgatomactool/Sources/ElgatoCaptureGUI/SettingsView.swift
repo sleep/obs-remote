@@ -88,15 +88,43 @@ struct SettingsView: View {
             GroupBox("Capture") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Bitrate:")
+                        Text("Quality:")
                             .foregroundStyle(.secondary)
-                        Picker("", selection: $settings.bitrateMbps) {
-                            ForEach([5, 10, 15, 20, 30, 40, 50], id: \.self) { mbps in
-                                Text("\(mbps) Mbps").tag(mbps)
+                        Picker("", selection: $settings.captureCodec) {
+                            ForEach(CaptureCodec.allCases) { codec in
+                                Text(codec.displayName).tag(codec)
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 120)
+                        .frame(width: 240)
+                    }
+
+                    if settings.captureCodec == .h264 {
+                        HStack {
+                            Text("Bitrate:")
+                                .foregroundStyle(.secondary)
+                            Picker("", selection: $settings.bitrateMbps) {
+                                ForEach([5, 10, 15, 20, 30, 40, 50], id: \.self) { mbps in
+                                    Text("\(mbps) Mbps").tag(mbps)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 120)
+                        }
+                    } else {
+                        // Lossless mode — explain the tradeoffs so file sizes
+                        // aren't a surprise (≈ 442 Mbps at 1080p60, ~55 MB/sec).
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(.blue)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Lossless 4:2:2 capture — writes .mov files for NLE compatibility.")
+                                    .font(.caption)
+                                Text("Expect ~55 MB/sec at 1080p60. Replay buffer will use the RAM cap aggressively.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
                 .padding(8)

@@ -140,12 +140,18 @@ public final class CaptureEngine: NSObject {
     /// Switch the output codec. If capture is active the encoder is restarted
     /// in place; otherwise the codec is staged for the next start. Always
     /// clears the replay buffer because mixed-codec frames can't be muxed
-    /// into one output file.
-    public func setCodec(_ newCodec: CaptureCodec) {
+    /// into one output file. If recording is active, the current file is
+    /// finalized cleanly before the codec swap — the writer was configured
+    /// for the old codec and would be left without a moov atom otherwise.
+    public func setCodec(_ newCodec: CaptureCodec) async {
         guard newCodec != encoder.codec else { return }
         let wasRunning = isRunning
         if wasRunning {
             encoder.stop()
+        }
+        if recorder.isRecording {
+            _ = await recorder.stopRecording()
+            DispatchQueue.main.async { self.onStateChange?() }
         }
         encoder.setCodec(newCodec)
         replayBuffer.clear()

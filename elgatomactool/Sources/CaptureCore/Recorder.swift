@@ -15,17 +15,18 @@ public final class Recorder {
         self.outputDir = outputDir ?? Recorder.defaultOutputDir()
     }
 
-    /// Start recording to a new MP4 file. Returns the file path.
+    /// Start recording to a new MP4/MOV file. Returns the file path.
     @discardableResult
     public func startRecording(width: Int = 1920, height: Int = 1080,
+                               codec: CaptureCodec = .h264,
                                sourceFormatHint: CMFormatDescription? = nil,
                                audioFormatHint: CMFormatDescription? = nil) throws -> URL {
-        let filename = Recorder.timestampedFilename(prefix: "recording", ext: "mp4")
+        let filename = Recorder.timestampedFilename(prefix: "recording", ext: codec.fileExtension)
         let url = outputDir.appendingPathComponent(filename)
 
         try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let writer = try AVAssetWriter(outputURL: url, fileType: codec.fileType)
 
         // nil outputSettings = passthrough (we provide already-encoded H.264 data)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
@@ -125,6 +126,7 @@ public final class Recorder {
     /// to interleave with) — that's the deadlock this code is designed to avoid.
     public static func writeFrames(_ frames: [EncodedFrame], audioSamples: [AudioSample] = [],
                             to url: URL,
+                            fileType: AVFileType = .mp4,
                             width: Int = 1920, height: Int = 1080) async -> Bool {
         // Drop any leading non-keyframes — the writer can't start mid-GOP
         let startIdx = frames.firstIndex(where: { $0.isKeyframe }) ?? frames.count
@@ -141,9 +143,16 @@ public final class Recorder {
             // Overwrite any leftover file at this path (e.g. an empty file from a previous hung save)
             try? FileManager.default.removeItem(at: url)
 
-            let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+            let writer = try AVAssetWriter(outputURL: url, fileType: fileType)
 
-            guard let formatDesc = createFormatDescription(from: usable[0]) else {
+            // Intra-only codecs (ProRes) carry the format description on every
+            // frame; H.264 keyframes need it reassembled from SPS/PPS.
+            let formatDesc: CMFormatDescription
+            if let fd = usable[0].formatDescription {
+                formatDesc = fd
+            } else if let fd = createFormatDescription(from: usable[0]) {
+                formatDesc = fd
+            } else {
                 print("[Recorder] Failed to create format description")
                 return false
             }
