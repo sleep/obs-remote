@@ -206,6 +206,11 @@ public final class Recorder {
             let videoQueue = DispatchQueue(label: "elgato.replay.write.video")
             let audioQueue = DispatchQueue(label: "elgato.replay.write.audio")
 
+            // Watchdog timeout for finishWriting. If finalisation hangs (disk stall, FUSE
+            // wedge, sandbox glitch), we cancel the writer and resume with failure rather
+            // than blocking the awaiter forever.
+            let finishTimeoutSeconds: Double = 10
+
             return await withCheckedContinuation { continuation in
                 let stateLock = NSLock()
                 var videoDone = false
@@ -215,6 +220,9 @@ public final class Recorder {
                 var videoWritten = 0
                 var audioWritten = 0
                 var continuationResumed = false
+                // Separate flag guarding the actual continuation.resume call. The
+                // finishWriting callback and the watchdog race for this; exactly one wins.
+                var resumeCompleted = false
 
                 func finalizeIfReady() {
                     stateLock.lock()
@@ -224,7 +232,32 @@ public final class Recorder {
                     guard canFinalize else { return }
 
                     print("[Recorder] Finalizing replay (\(videoWritten) video, \(audioWritten) audio)")
+
+                    // Schedule the watchdog before invoking finishWriting so we cover the
+                    // entire finalisation window. cancelWriting() is documented thread-safe.
+                    let watchdog = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+                    watchdog.schedule(deadline: .now() + finishTimeoutSeconds)
+                    watchdog.setEventHandler {
+                        stateLock.lock()
+                        let shouldResume = !resumeCompleted
+                        if shouldResume { resumeCompleted = true }
+                        stateLock.unlock()
+                        guard shouldResume else { return }
+                        print("[Recorder] finishWriting timed out after \(Int(finishTimeoutSeconds))s — resuming with failure")
+                        writer.cancelWriting()
+                        continuation.resume(returning: false)
+                    }
+                    watchdog.resume()
+
                     writer.finishWriting {
+                        stateLock.lock()
+                        let shouldResume = !resumeCompleted
+                        if shouldResume { resumeCompleted = true }
+                        stateLock.unlock()
+                        // Cancel the watchdog regardless — if we lost the race it's already
+                        // fired, but cancelling an already-fired one-shot timer is a no-op.
+                        watchdog.cancel()
+                        guard shouldResume else { return }
                         let success = writer.status == .completed
                         if !success {
                             print("[Recorder] Replay write failed: \(writer.error?.localizedDescription ?? "unknown")")
