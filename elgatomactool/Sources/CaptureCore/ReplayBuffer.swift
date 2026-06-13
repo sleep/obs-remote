@@ -41,7 +41,9 @@ public final class ReplayBuffer {
 
         if let last = frames.last,
            ReplayBuffer.isDiscontinuity(from: last.pts, to: frame.pts) {
-            print("[ReplayBuffer] Video PTS discontinuity — dropping \(frames.count) stale frames + \(audioSamples.count) audio samples")
+            let lastS = CMTimeGetSeconds(last.pts)
+            let curS = CMTimeGetSeconds(frame.pts)
+            print("[ReplayBuffer] Video PTS discontinuity — dropping \(frames.count) stale frames + \(audioSamples.count) audio samples (last=\(lastS)s, cur=\(curS)s, gap=\(curS - lastS)s)")
             frames.removeAll(keepingCapacity: true)
             audioSamples.removeAll(keepingCapacity: true)
             totalBytes = 0
@@ -77,7 +79,9 @@ public final class ReplayBuffer {
 
         if let last = audioSamples.last,
            ReplayBuffer.isDiscontinuity(from: last.pts, to: sample.pts) {
-            print("[ReplayBuffer] Audio PTS discontinuity — dropping \(audioSamples.count) stale audio samples")
+            let lastS = CMTimeGetSeconds(last.pts)
+            let curS = CMTimeGetSeconds(sample.pts)
+            print("[ReplayBuffer] Audio PTS discontinuity — dropping \(audioSamples.count) stale audio samples (last=\(lastS)s, cur=\(curS)s, gap=\(curS - lastS)s)")
             audioSamples.removeAll(keepingCapacity: true)
             audioBytes = 0
         }
