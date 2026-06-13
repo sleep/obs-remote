@@ -372,10 +372,15 @@ public final class Recorder {
         return movies.appendingPathComponent("ElgatoCapture")
     }
 
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
     public static func timestampedFilename(prefix: String, ext: String) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
-        return "\(prefix)_\(formatter.string(from: Date())).\(ext)"
+        return "\(prefix)_\(Self.timestampFormatter.string(from: Date())).\(ext)"
     }
 
     /// Create a CMFormatDescription from encoded H.264 parameter sets.

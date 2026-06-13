@@ -175,7 +175,11 @@ public final class HardwareEncoder {
 
     public func start() throws {
         // Stop existing session if any
-        if let session { VTCompressionSessionInvalidate(session); self.session = nil }
+        if let session {
+            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+            VTCompressionSessionInvalidate(session)
+            self.session = nil
+        }
 
         var sessionOut: VTCompressionSession?
 
