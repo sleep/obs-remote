@@ -11,6 +11,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private lazy var appIcon: NSImage = AppIconRenderer.makeIcon()
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Assign the dock icon as early as possible. Adding a SwiftUI Settings
+        // scene initialises the dock tile before applicationDidFinishLaunching
+        // fires, so a later assignment is silently ignored and the user sees the
+        // generic executable placeholder.
+        NSApp.applicationIconImage = appIcon
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureSetup()
     }
@@ -32,7 +40,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Set icon after activation policy to prevent the dock tile reset from clearing it
+        // Reassert the icon after the activation policy change — switching to
+        // .regular can reset the dock tile to the placeholder.
         NSApp.applicationIconImage = appIcon
 
         _ = statusBarController

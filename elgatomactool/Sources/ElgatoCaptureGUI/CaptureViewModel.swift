@@ -141,8 +141,15 @@ final class CaptureViewModel: ObservableObject {
             if let settings = self.settings, settings.rememberLastDevice {
                 settings.lastDeviceUniqueID = newDevice?.uniqueID
             }
-            // Don't start preview if we're reconnecting capture
-            if self.reconnectDeviceID == nil && !self.isReconnecting {
+            // Don't drive the engine if we're reconnecting capture
+            guard self.reconnectDeviceID == nil, !self.isReconnecting else { return }
+            // Hot-swap the live pipeline. startCapture/startPreview both pick up
+            // the new selectedDevice and tear the previous session down via the
+            // engine. Without this branch, switching the picker mid-capture is
+            // silently a no-op (startPreview bails when isCapturing is true).
+            if self.recording.isCapturing {
+                self.startCapture()
+            } else {
                 self.startPreviewForSelectedDevice()
             }
         }
@@ -621,6 +628,12 @@ final class CaptureViewModel: ObservableObject {
     }
 
     private func startStatusTimer() {
+        // Idempotent: a second startCapture() (e.g. device hot-swap) must not
+        // stack timers. Two 1Hz timers firing offset by <1s would each drain
+        // engine.frameCount mid-window, leaving liveFPS oscillating between
+        // tiny and large values even though capture is healthy.
+        stopStatusTimer()
+
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.engine.sampleBitrate()
