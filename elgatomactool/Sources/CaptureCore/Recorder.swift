@@ -130,10 +130,37 @@ public final class Recorder {
                             width: Int = 1920, height: Int = 1080) async -> Bool {
         // Drop any leading non-keyframes — the writer can't start mid-GOP
         let startIdx = frames.firstIndex(where: { $0.isKeyframe }) ?? frames.count
-        let usable = Array(frames[startIdx...])
+        var usable = Array(frames[startIdx...])
         guard !usable.isEmpty else {
             print("[Recorder] No keyframes found in \(frames.count) frames, cannot write replay")
             return false
+        }
+
+        // Belt-and-braces against a PTS discontinuity slipping past the replay
+        // buffer's guard. A single stale frame in front of a clock-domain change
+        // would otherwise be written as the file's start and the gap to the next
+        // sample would be encoded as a multi-hour first-frame duration. Keep only
+        // the segment after the last discontinuity, snapped to the next keyframe.
+        var splitIndex = 0
+        for i in 1..<usable.count {
+            let prev = usable[i - 1].pts
+            let curr = usable[i].pts
+            guard prev.isValid, curr.isValid else { splitIndex = i; continue }
+            let gap = CMTimeGetSeconds(CMTimeSubtract(curr, prev))
+            if !gap.isFinite || abs(gap) > 5.0 {
+                splitIndex = i
+            }
+        }
+        if splitIndex > 0 {
+            while splitIndex < usable.count && !usable[splitIndex].isKeyframe {
+                splitIndex += 1
+            }
+            guard splitIndex < usable.count else {
+                print("[Recorder] PTS discontinuity but no trailing keyframe — cannot write replay")
+                return false
+            }
+            print("[Recorder] PTS discontinuity in replay buffer — skipping \(splitIndex) stale frames, keeping \(usable.count - splitIndex)")
+            usable = Array(usable[splitIndex...])
         }
 
         do {
