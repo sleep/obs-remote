@@ -94,6 +94,9 @@ public final class CaptureEngine: NSObject {
     public var onStateChange: (() -> Void)?
     /// Called on every captured frame with the pixel buffer for display purposes.
     public var onFrameForDisplay: ((CVPixelBuffer) -> Void)?
+    /// Fired on the main thread after a recording is fully finalized. URL is
+    /// nil if finalization failed.
+    public var onRecordingFinished: ((URL?) -> Void)?
 
     // Serializes replay-save attempts so rapid clicks don't pile up concurrent writers,
     // which used to stack inside AVAssetWriter and exhaust resources / hang.
@@ -554,15 +557,19 @@ public final class CaptureEngine: NSObject {
     public func toggleRecording() {
         if recorder.isRecording {
             let onChange = onStateChange
+            let onFinished = onRecordingFinished
             Task.detached {
-                _ = await self.recorder.stopRecording()
+                let url = await self.recorder.stopRecording()
                 // Clear the format hint so the next recording session derives its own
                 // from the replay buffer / first keyframe (covers device or resolution
                 // changes between sessions).
                 self.recordingFormatLock.lock()
                 self.recordingFormatDesc = nil
                 self.recordingFormatLock.unlock()
-                await MainActor.run { onChange?() }
+                await MainActor.run {
+                    onChange?()
+                    onFinished?(url)
+                }
             }
         } else {
             do {
@@ -596,12 +603,12 @@ public final class CaptureEngine: NSObject {
         }
     }
 
-    public func saveReplay(lastSeconds: Double? = nil, completion: ((Bool) -> Void)? = nil) {
+    public func saveReplay(lastSeconds: Double? = nil, completion: ((URL?) -> Void)? = nil) {
         saveReplayLock.lock()
         if isSavingReplay {
             saveReplayLock.unlock()
             print("[Capture] Replay save already in progress — ignoring duplicate request")
-            DispatchQueue.main.async { completion?(false) }
+            DispatchQueue.main.async { completion?(nil) }
             return
         }
         isSavingReplay = true
@@ -611,7 +618,7 @@ public final class CaptureEngine: NSObject {
         guard !replayData.video.isEmpty else {
             print("[Capture] Replay buffer is empty, nothing to save")
             saveReplayLock.lock(); isSavingReplay = false; saveReplayLock.unlock()
-            DispatchQueue.main.async { completion?(false) }
+            DispatchQueue.main.async { completion?(nil) }
             return
         }
 
@@ -635,7 +642,7 @@ public final class CaptureEngine: NSObject {
             await MainActor.run {
                 self?.clearSavingReplayFlag()
                 onChange?()
-                completion?(success)
+                completion?(success ? url : nil)
             }
         }
     }
@@ -646,21 +653,22 @@ public final class CaptureEngine: NSObject {
         saveReplayLock.unlock()
     }
 
-    public func takeScreenshot() {
+    @discardableResult
+    public func takeScreenshot() -> URL? {
         latestFrameLock.lock()
         let pixelBuffer = latestPixelBuffer
         latestFrameLock.unlock()
 
         guard let pixelBuffer else {
             print("[Capture] No frame available for screenshot")
-            return
+            return nil
         }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
             print("[Capture] Failed to create image from frame")
-            return
+            return nil
         }
 
         let filename = Recorder.timestampedFilename(prefix: "screenshot", ext: "png")
@@ -671,16 +679,20 @@ public final class CaptureEngine: NSObject {
                                                      withIntermediateDirectories: true)
         } catch {
             print("[Capture] Failed to create output directory: \(error)")
-            return
+            return nil
         }
 
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
             print("[Capture] Failed to create image destination")
-            return
+            return nil
         }
         CGImageDestinationAddImage(dest, cgImage, nil)
-        CGImageDestinationFinalize(dest)
+        guard CGImageDestinationFinalize(dest) else {
+            print("[Capture] Failed to finalize screenshot")
+            return nil
+        }
         print("[Capture] Screenshot saved: \(url.path)")
+        return url
     }
 
     /// Create a small thumbnail CGImage from the latest captured frame.

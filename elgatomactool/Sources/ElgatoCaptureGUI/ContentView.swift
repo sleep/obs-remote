@@ -18,7 +18,8 @@ struct ContentView: View {
             devices: vm.devices,
             replay: vm.replay,
             recording: vm.recording,
-            remote: remote
+            remote: remote,
+            toast: vm.toast
         )
     }
 }
@@ -31,6 +32,7 @@ private struct ContentBody: View {
     @ObservedObject var replay: ReplayBufferVM
     @ObservedObject var recording: RecordingVM
     @ObservedObject var remote: RemoteController
+    @ObservedObject var toast: ToastVM
     @State private var showReplaySettings = false
     @State private var showRemote = false
     @State private var isFullscreen = false
@@ -74,6 +76,16 @@ private struct ContentBody: View {
                             .padding(12)
                     }
                     Spacer()
+                }
+            }
+
+            // Save toast — bottom trailing
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    SaveToastView(toast: toast)
+                        .padding(16)
                 }
             }
         }
@@ -127,6 +139,16 @@ private struct ContentBody: View {
                 // Disconnect overlay — shown on top of the frozen video/buffer
                 if devices.deviceDisconnected {
                     DisconnectOverlayView()
+                }
+
+                // Save toast — bottom trailing of the preview area
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        SaveToastView(toast: toast)
+                            .padding(12)
+                    }
                 }
             }
             .clipped()

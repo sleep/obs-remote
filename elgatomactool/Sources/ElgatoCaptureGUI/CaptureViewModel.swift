@@ -27,6 +27,7 @@ final class CaptureViewModel: ObservableObject {
     let devices = DeviceVM()
     let replay = ReplayBufferVM()
     let recording = RecordingVM()
+    let toast = ToastVM()
 
     // MARK: Engine + settings
     let engine: CaptureEngine
@@ -102,6 +103,11 @@ final class CaptureViewModel: ObservableObject {
             Task { @MainActor in
                 self?.syncState()
             }
+        }
+
+        engine.onRecordingFinished = { [weak self] url in
+            guard let self, let url else { return }
+            self.showSaveToast(for: url, kind: .recording)
         }
 
         settings.$outputDirectoryPath
@@ -555,13 +561,16 @@ final class CaptureViewModel: ObservableObject {
         replay.screenshotFeedback = .inProgress
         recording.statusMessage = "Saving screenshot..."
         Task.detached { [weak self] in
-            self?.engine.takeScreenshot()
+            let url = self?.engine.takeScreenshot()
             await MainActor.run {
                 guard let self else { return }
                 self.replay.screenshotFeedback = .success
                 self.recording.statusMessage = "Screenshot saved"
                 self.clearScreenshotFeedbackAfterDelay()
                 self.clearStatusAfterDelay()
+                if let url {
+                    self.showSaveToast(for: url, kind: .screenshot)
+                }
             }
         }
     }
@@ -569,12 +578,22 @@ final class CaptureViewModel: ObservableObject {
     func saveReplay() {
         replay.replaySaveFeedback = .inProgress
         recording.statusMessage = "Saving replay..."
-        engine.saveReplay(lastSeconds: replay.replayDuration) { [weak self] success in
+        engine.saveReplay(lastSeconds: replay.replayDuration) { [weak self] url in
             guard let self else { return }
+            let success = url != nil
             self.replay.replaySaveFeedback = success ? .success : .failed
             self.recording.statusMessage = success ? "Replay saved" : "Replay save failed"
             self.clearReplaySaveFeedbackAfterDelay()
+            if let url {
+                self.showSaveToast(for: url, kind: .replay)
+            }
         }
+    }
+
+    /// Read the size of a just-saved file and present a save toast.
+    private func showSaveToast(for url: URL, kind: SaveToast.Kind) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+        toast.show(SaveToast(url: url, kind: kind, sizeBytes: size))
     }
 
     func openOutputFolder() {
