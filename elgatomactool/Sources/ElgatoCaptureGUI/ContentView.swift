@@ -85,7 +85,6 @@ private struct ContentBody: View {
             ZStack {
                 // Background pattern — visible in letterbox/pillarbox bars
                 Color(white: 0.06)
-                // WatermarkView()
 
                 CaptureVideoView(engine: vm.engine, recording: recording, devices: devices)
                     .onTapGesture(count: 2) { toggleFullscreen() }
