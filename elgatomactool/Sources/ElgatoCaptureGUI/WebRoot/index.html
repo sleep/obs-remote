@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07060d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Capture">
+  <title>Elgato Capture Remote</title>
+  <link rel="manifest" href="/manifest.webmanifest" id="manifest-link">
+  <link rel="apple-touch-icon" href="/icon-180.png">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/framework7@8/framework7-bundle.min.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app">
+    <div class="view view-main view-init safe-areas">
+      <div class="page" data-name="home">
+
+        <!-- Top bar -->
+        <div class="navbar navbar-glass">
+          <div class="navbar-bg"></div>
+          <div class="navbar-inner">
+            <div class="left">
+              <span class="status-dot" id="statusDot"></span>
+              <span class="brand">CAPTURE<span class="brand-accent">·REMOTE</span></span>
+            </div>
+            <div class="right">
+              <span class="state-pill" id="statePill">—</span>
+              <a class="link icon-only settings-btn" href="#" id="settingsBtn">
+                <i class="f7-icons">slider_horizontal_3</i>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div class="page-content">
+
+          <!-- Live preview -->
+          <div class="preview-wrap">
+            <div class="preview-frame" id="previewFrame">
+              <img id="previewImg" alt="preview" />
+              <div class="preview-placeholder" id="previewPlaceholder">
+                <i class="f7-icons">video_camera</i>
+                <span id="placeholderText">No signal</span>
+              </div>
+              <div class="preview-overlays">
+                <div class="badge badge-live hidden" id="liveBadge"><span class="pulse"></span>LIVE</div>
+                <div class="badge badge-rec hidden" id="recBadge"><span class="rec-dot"></span><span id="recTime">0:00</span></div>
+                <div class="badge badge-meta" id="resBadge"></div>
+              </div>
+              <div class="preview-scanline"></div>
+            </div>
+          </div>
+
+          <!-- Primary action -->
+          <div class="block primary-block">
+            <button class="btn-primary" id="captureBtn">
+              <i class="f7-icons" id="captureIcon">play_fill</i>
+              <span id="captureLabel">Start Capture</span>
+            </button>
+          </div>
+
+          <!-- Capture actions -->
+          <div class="actions-grid" id="actionsGrid">
+            <button class="action-tile" id="recordTile" data-cmd="record">
+              <i class="f7-icons" id="recordTileIcon">record_circle</i>
+              <span id="recordTileLabel">Record</span>
+            </button>
+            <button class="action-tile" id="screenshotTile" data-cmd="screenshot">
+              <i class="f7-icons">camera</i>
+              <span>Screenshot</span>
+            </button>
+            <button class="action-tile" id="replayTile" data-cmd="replay">
+              <i class="f7-icons">gobackward</i>
+              <span id="replayTileLabel">Save Replay</span>
+            </button>
+            <button class="action-tile" id="passthroughTile">
+              <i class="f7-icons" id="passthroughIcon">speaker_slash_fill</i>
+              <span>Audio</span>
+            </button>
+          </div>
+
+          <!-- Audio meter -->
+          <div class="audio-row" id="audioRow">
+            <span class="audio-label">AUDIO</span>
+            <div class="audio-meter"><div class="audio-fill" id="audioFill"></div></div>
+          </div>
+
+          <!-- Stats -->
+          <div class="section-title">Telemetry</div>
+          <div class="stats-grid" id="statsGrid">
+            <div class="stat-card" id="card-fps">
+              <div class="stat-head"><span class="stat-name">FPS</span><span class="stat-value" id="val-fps">0</span></div>
+              <canvas class="spark" id="spark-fps"></canvas>
+            </div>
+            <div class="stat-card" id="card-bitrate">
+              <div class="stat-head"><span class="stat-name">BITRATE</span><span class="stat-value" id="val-bitrate">0<small>mbps</small></span></div>
+              <canvas class="spark" id="spark-bitrate"></canvas>
+            </div>
+            <div class="stat-card" id="card-buffer">
+              <div class="stat-head"><span class="stat-name">BUFFER</span><span class="stat-value" id="val-buffer">0<small>s</small></span></div>
+              <div class="stat-sub" id="sub-buffer">0 MB</div>
+            </div>
+            <div class="stat-card" id="card-cpu">
+              <div class="stat-head"><span class="stat-name">CPU</span><span class="stat-value" id="val-cpu">0<small>%</small></span></div>
+              <canvas class="spark" id="spark-cpu"></canvas>
+            </div>
+            <div class="stat-card" id="card-gpu">
+              <div class="stat-head"><span class="stat-name">GPU</span><span class="stat-value" id="val-gpu">0<small>%</small></span></div>
+              <canvas class="spark" id="spark-gpu"></canvas>
+            </div>
+            <div class="stat-card" id="card-ram">
+              <div class="stat-head"><span class="stat-name">RAM</span><span class="stat-value" id="val-ram">0</span></div>
+              <div class="stat-sub" id="sub-ram">DISK <span id="val-disk">0</span> GB free</div>
+            </div>
+          </div>
+
+          <div class="status-line" id="statusLine"></div>
+
+          <div class="footer-brand">Elgato Capture · Remote Control</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings popup -->
+  <div class="popup settings-popup" id="settingsPopup">
+    <div class="view">
+      <div class="page">
+        <div class="navbar navbar-glass">
+          <div class="navbar-bg"></div>
+          <div class="navbar-inner">
+            <div class="left"><span class="brand">SETTINGS</span></div>
+            <div class="right"><a class="link popup-close" href="#">Done</a></div>
+          </div>
+        </div>
+        <div class="page-content" id="settingsContent">
+
+          <div class="section-title">Devices</div>
+          <div class="settings-card">
+            <label class="field">
+              <span class="field-label"><i class="f7-icons">videocam</i> Video</span>
+              <div class="select-wrap"><select id="deviceSelect"></select></div>
+            </label>
+            <label class="field">
+              <span class="field-label"><i class="f7-icons">waveform</i> Audio</span>
+              <div class="select-wrap"><select id="audioSelect"></select></div>
+            </label>
+            <button class="ghost-btn" id="refreshBtn"><i class="f7-icons">arrow_clockwise</i> Refresh devices</button>
+          </div>
+
+          <div class="section-title">Encoding</div>
+          <div class="settings-card">
+            <div class="field-label"><i class="f7-icons">gauge</i> Bitrate <span class="field-val" id="bitrateVal">20 Mbps</span></div>
+            <div class="chip-row" id="bitrateChips"></div>
+          </div>
+
+          <div class="section-title">Replay Buffer</div>
+          <div class="settings-card">
+            <div class="field-label"><i class="f7-icons">timer</i> Duration <span class="field-val" id="replayVal">30s</span></div>
+            <div class="chip-row" id="replayChips"></div>
+            <label class="field">
+              <span class="field-label"><i class="f7-icons">square_grid_2x2_fill</i> RAM cap</span>
+              <div class="select-wrap"><select id="ramSelect"></select></div>
+            </label>
+          </div>
+
+          <div class="section-title">General</div>
+          <div class="settings-card">
+            <label class="toggle-row">
+              <span>Remember last device</span>
+              <span class="switch"><input type="checkbox" id="tgRemember"><span class="slider"></span></span>
+            </label>
+            <label class="toggle-row">
+              <span>Auto-start capture on launch</span>
+              <span class="switch"><input type="checkbox" id="tgAutostart"><span class="slider"></span></span>
+            </label>
+            <label class="toggle-row">
+              <span>Start minimized (menu bar)</span>
+              <span class="switch"><input type="checkbox" id="tgMinimized"><span class="slider"></span></span>
+            </label>
+          </div>
+
+          <div class="section-title">Overlay Stats</div>
+          <div class="settings-card"><div class="check-grid" id="overlayChecks"></div></div>
+
+          <div class="section-title">Menu Bar Display</div>
+          <div class="settings-card"><div class="check-grid" id="statusBarChecks"></div></div>
+
+          <div class="section-title">Output</div>
+          <div class="settings-card">
+            <div class="output-path" id="outputPath">—</div>
+          </div>
+
+          <div class="footer-brand">Settings sync live with your Mac</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Locked screen -->
+  <div class="locked-overlay hidden" id="lockedOverlay">
+    <div class="locked-card">
+      <div class="locked-icon">🔒</div>
+      <h2>Access key required</h2>
+      <p>This remote is protected. Scan the QR code in Elgato Capture on your Mac to reconnect.</p>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/framework7@8/framework7-bundle.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

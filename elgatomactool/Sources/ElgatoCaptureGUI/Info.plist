@@ -4,5 +4,7 @@
 <dict>
     <key>NSCameraUsageDescription</key>
     <string>Elgato Capture needs camera access to capture video from your Elgato device.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Elgato Capture hosts a remote-control web server so you can control capture from your phone on the same network.</string>
 </dict>
 </plist>

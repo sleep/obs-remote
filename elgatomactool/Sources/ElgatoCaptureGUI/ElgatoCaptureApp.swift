@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     let settings = AppSettings()
     private(set) lazy var viewModel = CaptureViewModel(settings: settings)
+    private(set) lazy var remoteController = RemoteController(viewModel: viewModel, settings: settings)
     private(set) lazy var statusBarController = StatusBarController(viewModel: viewModel, settings: settings)
     private var didFinishSetup = false
 
@@ -37,6 +38,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         _ = statusBarController
         viewModel.autoConnectLastDevice()
+
+        // Launch the remote web server if the user enabled it.
+        if settings.remoteEnabled {
+            remoteController.start()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -57,6 +63,7 @@ struct ElgatoCaptureApp: App {
             ContentView()
                 .environmentObject(appDelegate.viewModel)
                 .environmentObject(appDelegate.settings)
+                .environmentObject(appDelegate.remoteController)
                 .onAppear { appDelegate.ensureSetup() }
         }
         .windowResizability(.contentMinSize)

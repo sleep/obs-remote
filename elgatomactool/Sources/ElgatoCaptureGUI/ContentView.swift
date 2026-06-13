@@ -5,8 +5,10 @@ import CaptureCore
 struct ContentView: View {
     @EnvironmentObject var vm: CaptureViewModel
     @EnvironmentObject var settings: AppSettings
+    @EnvironmentObject var remote: RemoteController
     @State private var showReplaySettings = false
     @State private var showSettings = false
+    @State private var showRemote = false
     @State private var isFullscreen = false
 
     var body: some View {
@@ -22,8 +24,15 @@ struct ContentView: View {
             SettingsView()
                 .environmentObject(settings)
         }
+        .sheet(isPresented: $showRemote) {
+            RemotePanelView(remote: remote)
+                .environmentObject(settings)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .showSettingsSheet)) { _ in
             showSettings = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showRemoteSheet)) { _ in
+            showRemote = true
         }
         .onAppear {
             vm.refreshDevices()
@@ -431,6 +440,15 @@ struct ContentView: View {
                         Image(systemName: "gearshape")
                     }
                     .help("Preferences")
+
+                    Button {
+                        showRemote = true
+                    } label: {
+                        Image(systemName: remote.isRunning
+                              ? "antenna.radiowaves.left.and.right" : "iphone")
+                            .foregroundStyle(remote.isRunning ? Color.green : Color.secondary)
+                    }
+                    .help("Mobile remote control")
 
                     Button {
                         vm.openOutputFolder()

@@ -92,6 +92,40 @@ swift run obs-remote-server --password YOUR_PASSWORD
 
 ---
 
+## Elgato Capture — Mobile Remote (native app)
+
+The `elgatomactool` SwiftUI app has a built-in mobile remote. It launches a local
+web server on your Mac and serves a dark, Framework7-based PWA you control from your
+phone — buttons, live stats, and a live preview (the same screenshot feed the app shows).
+
+```
+┌─────────────┐      HTTP + JPEG       ┌────────────────────┐
+│ Phone (PWA) │ ◄───────────────────► │  Elgato Capture.app │
+│ Framework7  │   LAN, PSK-protected   │  (embedded server)  │
+└─────────────┘                        └────────────────────┘
+```
+
+### Usage
+
+1. Run the app: `cd elgatomactool && swift run elgato-capture-gui`
+2. Click the **phone icon** in the toolbar (or **Mobile Remote…** in the menu bar).
+3. Click **Start Remote Server**, then scan the QR code with your phone.
+4. Optionally enable **Start automatically on launch**.
+
+### Features
+
+- **Live preview** — periodic JPEG frames from the capture pipeline.
+- **Full control** — start/stop capture, record, screenshot, save replay, audio passthrough.
+- **Live telemetry** — FPS, bitrate, replay buffer, CPU/GPU/RAM/disk, audio meter, with sparklines.
+- **All settings** — device + audio selection, bitrate, replay duration & RAM cap, overlay
+  stats, menu-bar fields, and general toggles, all synced live with the Mac app.
+- **PSK protection** — the access key is embedded in the QR/URL (`?k=…`) and stays stable
+  across sessions, so the installed PWA keeps working. Rotate it anytime from the panel.
+- **PWA / offline** — installable to the home screen with a service worker that caches the
+  app shell. The PSK is baked into the manifest `start_url`.
+
+The macOS local-network permission prompt may appear the first time the server starts.
+
 ## OBS Setup
 
 Open OBS > Tools > WebSocket Server Settings:
