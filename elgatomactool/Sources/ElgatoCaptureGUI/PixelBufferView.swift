@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import CoreVideo
 import IOSurface
+import QuartzCore
 import CaptureCore
 
 /// NSView that renders CVPixelBuffers directly via IOSurface — zero-copy, no preview layer.
@@ -32,12 +33,21 @@ final class PixelBufferNSView: NSView {
         guard frameCount > Self.framesToSkip else { return }
 
         guard let surface = CVPixelBufferGetIOSurface(pixelBuffer) else { return }
+        // CALayer.contents can be assigned off the main thread, but Core Animation
+        // will otherwise try to implicit-animate the swap and emit thread warnings.
+        // Frame this mutation in a CATransaction with actions disabled.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer?.contents = surface.takeUnretainedValue()
+        CATransaction.commit()
     }
 
     func resetFrameCount() {
         frameCount = 0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer?.contents = nil
+        CATransaction.commit()
     }
 }
 
@@ -69,9 +79,10 @@ struct PixelBufferDisplayView: NSViewRepresentable {
             currentEngine = engine
             view?.resetFrameCount()
             engine.onFrameForDisplay = { [weak self] pixelBuffer in
-                DispatchQueue.main.async {
-                    self?.view?.display(pixelBuffer)
-                }
+                // Called on the engine's video-output queue. Skip the main-queue hop —
+                // CALayer.contents can be set off-main when wrapped in a CATransaction
+                // with implicit actions disabled (see PixelBufferNSView.display).
+                self?.view?.display(pixelBuffer)
             }
         }
     }

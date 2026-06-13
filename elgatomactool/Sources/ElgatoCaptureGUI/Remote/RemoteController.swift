@@ -131,15 +131,15 @@ final class RemoteController: ObservableObject {
     private func stateJSON() -> Data {
         let vm = viewModel
 
-        let devices = vm.availableDevices.map { device -> [String: Any] in
+        let devices = vm.devices.availableDevices.map { device -> [String: Any] in
             ["id": device.uniqueID,
              "name": device.localizedName,
-             "selected": device.uniqueID == vm.selectedDevice?.uniqueID]
+             "selected": device.uniqueID == vm.devices.selectedDevice?.uniqueID]
         }
-        let audioDevices = vm.availableAudioDevices.map { device -> [String: Any] in
+        let audioDevices = vm.devices.availableAudioDevices.map { device -> [String: Any] in
             ["id": device.uniqueID,
              "name": device.localizedName,
-             "selected": device.uniqueID == vm.selectedAudioDevice?.uniqueID]
+             "selected": device.uniqueID == vm.devices.selectedAudioDevice?.uniqueID]
         }
 
         func feedback(_ f: ActionFeedback) -> String {
@@ -152,40 +152,40 @@ final class RemoteController: ObservableObject {
         }
 
         let snapshot: [String: Any] = [
-            "capturing": vm.isCapturing,
-            "previewing": vm.isPreviewing,
-            "recording": vm.isRecording,
-            "recordingDuration": vm.recordingDuration,
-            "deviceDisconnected": vm.deviceDisconnected,
-            "cameraAuthorized": vm.cameraAuthorized,
-            "resolution": vm.captureResolution,
-            "fps": vm.liveFPS,
-            "droppedFrames": vm.droppedFrames,
-            "bitrate": vm.liveBitrateMbps,
-            "statusMessage": vm.statusMessage,
-            "errorMessage": vm.errorMessage.map { $0 as Any } ?? NSNull(),
-            "screenshotFeedback": feedback(vm.screenshotFeedback),
-            "replayFeedback": feedback(vm.replaySaveFeedback),
-            "passthrough": vm.audioPassthroughEnabled,
-            "hasAudio": vm.hasAudio,
-            "audio": ["level": vm.audioLevel, "peak": vm.audioPeakLevel],
-            "buffer": ["duration": vm.bufferDuration,
-                       "frames": vm.bufferFrameCount,
-                       "sizeMB": vm.bufferSizeMB],
-            "system": ["cpu": vm.cpuPercent,
-                       "gpu": vm.gpuPercent,
-                       "ramMB": vm.ramMB,
-                       "diskFreeGB": vm.diskFreeGB],
-            "history": ["fps": Array(vm.fpsHistory.suffix(60)),
-                        "cpu": Array(vm.cpuHistory.suffix(60)),
-                        "gpu": Array(vm.gpuHistory.suffix(60)),
-                        "audio": Array(vm.audioHistory.suffix(60))],
+            "capturing": vm.recording.isCapturing,
+            "previewing": vm.recording.isPreviewing,
+            "recording": vm.recording.isRecording,
+            "recordingDuration": vm.recording.recordingDuration,
+            "deviceDisconnected": vm.devices.deviceDisconnected,
+            "cameraAuthorized": vm.devices.cameraAuthorized,
+            "resolution": vm.stats.captureResolution,
+            "fps": vm.stats.liveFPS,
+            "droppedFrames": vm.stats.droppedFrames,
+            "bitrate": vm.stats.liveBitrateMbps,
+            "statusMessage": vm.recording.statusMessage,
+            "errorMessage": vm.recording.errorMessage.map { $0 as Any } ?? NSNull(),
+            "screenshotFeedback": feedback(vm.replay.screenshotFeedback),
+            "replayFeedback": feedback(vm.replay.replaySaveFeedback),
+            "passthrough": vm.devices.audioPassthroughEnabled,
+            "hasAudio": vm.stats.hasAudio,
+            "audio": ["level": vm.stats.audioLevel, "peak": vm.stats.audioPeakLevel],
+            "buffer": ["duration": vm.replay.bufferDuration,
+                       "frames": vm.replay.bufferFrameCount,
+                       "sizeMB": vm.replay.bufferSizeMB],
+            "system": ["cpu": vm.stats.cpuPercent,
+                       "gpu": vm.stats.gpuPercent,
+                       "ramMB": vm.stats.ramMB,
+                       "diskFreeGB": vm.stats.diskFreeGB],
+            "history": ["fps": Array(vm.stats.fpsHistory.suffix(60)),
+                        "cpu": Array(vm.stats.cpuHistory.suffix(60)),
+                        "gpu": Array(vm.stats.gpuHistory.suffix(60)),
+                        "audio": Array(vm.stats.audioHistory.suffix(60))],
             "devices": devices,
             "audioDevices": audioDevices,
             "settings": [
-                "bitrateMbps": vm.bitrateMbps,
-                "replayDuration": vm.replayDuration,
-                "maxReplayRAM": vm.maxReplayRAM,
+                "bitrateMbps": vm.recording.bitrateMbps,
+                "replayDuration": vm.replay.replayDuration,
+                "maxReplayRAM": vm.replay.maxReplayRAM,
                 "rememberLastDevice": settings.rememberLastDevice,
                 "autoStartCapture": settings.autoStartCapture,
                 "startMinimized": settings.startMinimized,
@@ -242,18 +242,18 @@ final class RemoteController: ObservableObject {
         case "refresh":
             vm.refreshDevices()
         case "passthrough":
-            if let on = obj["on"] as? Bool { vm.audioPassthroughEnabled = on }
+            if let on = obj["on"] as? Bool { vm.devices.audioPassthroughEnabled = on }
         case "selectDevice":
             if let id = obj["id"] as? String,
-               let device = vm.availableDevices.first(where: { $0.uniqueID == id }) {
-                vm.selectedDevice = device
+               let device = vm.devices.availableDevices.first(where: { $0.uniqueID == id }) {
+                vm.devices.selectedDevice = device
             }
         case "selectAudioDevice":
             if let id = obj["id"] as? String, id != "none",
-               let device = vm.availableAudioDevices.first(where: { $0.uniqueID == id }) {
-                vm.selectedAudioDevice = device
+               let device = vm.devices.availableAudioDevices.first(where: { $0.uniqueID == id }) {
+                vm.devices.selectedAudioDevice = device
             } else {
-                vm.selectedAudioDevice = nil
+                vm.devices.selectedAudioDevice = nil
             }
         default:
             return Data("{\"ok\":false,\"error\":\"unknown command\"}".utf8)
@@ -267,9 +267,9 @@ final class RemoteController: ObservableObject {
         }
 
         let vm = viewModel
-        if let v = obj["bitrateMbps"] as? Int { vm.bitrateMbps = v }
-        if let v = obj["replayDuration"] as? NSNumber { vm.replayDuration = v.doubleValue }
-        if let v = obj["maxReplayRAM"] as? Int { vm.maxReplayRAM = v }
+        if let v = obj["bitrateMbps"] as? Int { vm.recording.bitrateMbps = v }
+        if let v = obj["replayDuration"] as? NSNumber { vm.replay.replayDuration = v.doubleValue }
+        if let v = obj["maxReplayRAM"] as? Int { vm.replay.maxReplayRAM = v }
         if let v = obj["rememberLastDevice"] as? Bool { settings.rememberLastDevice = v }
         if let v = obj["autoStartCapture"] as? Bool { settings.autoStartCapture = v }
         if let v = obj["startMinimized"] as? Bool { settings.startMinimized = v }

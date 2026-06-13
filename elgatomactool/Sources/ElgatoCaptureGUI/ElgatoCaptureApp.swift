@@ -9,8 +9,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var remoteController = RemoteController(viewModel: viewModel, settings: settings)
     private(set) lazy var statusBarController = StatusBarController(viewModel: viewModel, settings: settings)
     private var didFinishSetup = false
+    private var didHandleStartupHide = false
+    private var isPerformingStartupHide = false
 
     private lazy var appIcon: NSImage = AppIconRenderer.makeIcon()
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Assign the dock icon as early as possible. Adding a SwiftUI Settings
+        // scene initialises the dock tile before applicationDidFinishLaunching
+        // fires, so a later assignment is silently ignored and the user sees the
+        // generic executable placeholder.
+        NSApp.applicationIconImage = appIcon
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureSetup()
@@ -22,10 +32,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard !didFinishSetup else { return }
         didFinishSetup = true
 
-        if settings.startMinimized {
-            NSApp.setActivationPolicy(.accessory)
-        } else {
-            NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.regular)
+        if !settings.startMinimized {
             if #available(macOS 14.0, *) {
                 NSApp.activate()
             } else {
@@ -33,7 +41,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Set icon after activation policy to prevent the dock tile reset from clearing it
+        // Reassert the icon after the activation policy change — switching to
+        // .regular can reset the dock tile to the placeholder.
         NSApp.applicationIconImage = appIcon
 
         _ = statusBarController
@@ -45,9 +54,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Hide the SwiftUI window that gets auto-opened on launch. Called from the
+    /// WindowGroup's onAppear so the window actually exists by the time we look
+    /// for it. Runs exactly once.
+    func hideStartupWindowIfNeeded() {
+        guard !didHandleStartupHide else { return }
+        didHandleStartupHide = true
+        guard settings.startMinimized else { return }
+
+        // Suppress the accessory-policy flip in
+        // applicationShouldTerminateAfterLastWindowClosed in case AppKit
+        // routes our programmatic hide through that hook.
+        isPerformingStartupHide = true
+        for window in NSApp.windows where window.title != "" {
+            window.orderOut(nil)
+        }
+        // Reassert dock icon — defensive in case the window hide caused a
+        // dock-tile refresh.
+        NSApp.applicationIconImage = appIcon
+        DispatchQueue.main.async { [weak self] in
+            self?.isPerformingStartupHide = false
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep running in menu bar when window is closed
-        NSApp.setActivationPolicy(.accessory)
+        if !isPerformingStartupHide {
+            NSApp.setActivationPolicy(.accessory)
+        }
         return false
     }
 }
@@ -64,7 +98,10 @@ struct ElgatoCaptureApp: App {
                 .environmentObject(appDelegate.viewModel)
                 .environmentObject(appDelegate.settings)
                 .environmentObject(appDelegate.remoteController)
-                .onAppear { appDelegate.ensureSetup() }
+                .onAppear {
+                    appDelegate.ensureSetup()
+                    appDelegate.hideStartupWindowIfNeeded()
+                }
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 960, height: 620)
@@ -74,6 +111,12 @@ struct ElgatoCaptureApp: App {
                     Toggle(stat.label, isOn: overlayStatBinding(for: stat))
                 }
             }
+        }
+
+        Settings {
+            SettingsView()
+                .environmentObject(appDelegate.settings)
+                .environmentObject(appDelegate.viewModel)
         }
     }
 

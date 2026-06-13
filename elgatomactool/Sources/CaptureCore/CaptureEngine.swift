@@ -117,8 +117,9 @@ public final class CaptureEngine: NSObject {
     /// Frames before this are discarded to avoid green artifacts from incomplete GOPs.
     private var receivedFirstKeyframe = false
 
-    public init(replayDuration: Double = 30, bitrateMbps: Int = 20) {
-        self.encoder = HardwareEncoder(bitrateMbps: bitrateMbps)
+    public init(replayDuration: Double = 30, bitrateMbps: Int = 20,
+                codec: CaptureCodec = .h264) {
+        self.encoder = HardwareEncoder(bitrateMbps: bitrateMbps, codec: codec)
         self.replayBuffer = ReplayBuffer(duration: replayDuration)
         self.recorder = Recorder()
         super.init()
@@ -131,6 +132,41 @@ public final class CaptureEngine: NSObject {
     /// Update the encoder's target bitrate at runtime.
     public func updateBitrate(mbps: Int) {
         encoder.updateBitrate(mbps: mbps)
+    }
+
+    /// Currently configured output codec.
+    public var codec: CaptureCodec { encoder.codec }
+
+    /// Switch the output codec. If capture is active the encoder is restarted
+    /// in place; otherwise the codec is staged for the next start. Always
+    /// clears the replay buffer because mixed-codec frames can't be muxed
+    /// into one output file. If recording is active, the current file is
+    /// finalized cleanly before the codec swap — the writer was configured
+    /// for the old codec and would be left without a moov atom otherwise.
+    public func setCodec(_ newCodec: CaptureCodec) async {
+        guard newCodec != encoder.codec else { return }
+        let wasRunning = isRunning
+        if wasRunning {
+            encoder.stop()
+        }
+        if recorder.isRecording {
+            _ = await recorder.stopRecording()
+            DispatchQueue.main.async { self.onStateChange?() }
+        }
+        encoder.setCodec(newCodec)
+        replayBuffer.clear()
+        recordingFormatLock.lock()
+        recordingFormatDesc = nil
+        recordingFormatLock.unlock()
+        receivedFirstKeyframe = false
+        if wasRunning {
+            do {
+                try encoder.start()
+            } catch {
+                print("[Capture] Encoder restart after codec change failed: \(error)")
+            }
+        }
+        print("[Capture] Codec set to \(newCodec.displayName)")
     }
 
     // MARK: - Replay buffer config
@@ -207,41 +243,54 @@ public final class CaptureEngine: NSObject {
 
     /// Set the audio input device explicitly. Pass nil to remove audio input.
     /// Can be called at any time — the capture session is reconfigured in place.
-    public func setAudioInputDevice(_ device: AVCaptureDevice?) {
+    /// Returns true if both an audio input and output were successfully wired up.
+    @discardableResult
+    public func setAudioInputDevice(_ device: AVCaptureDevice?) -> Bool {
         captureSession.beginConfiguration()
         removeAudioOutput()
+        defer { captureSession.commitConfiguration() }
 
-        if let device {
-            do {
-                let input = try AVCaptureDeviceInput(device: device)
-                if captureSession.canAddInput(input) {
-                    captureSession.addInput(input)
-                    audioDeviceInput = input
-                }
-            } catch {
-                print("[Capture] Could not add audio input: \(error)")
-            }
+        guard let device else { return false }
 
-            let output = AVCaptureAudioDataOutput()
-            // Force Float32 interleaved so metering + passthrough get a known format
-            output.audioSettings = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMBitDepthKey: 32,
-                AVLinearPCMIsFloatKey: true,
-                AVLinearPCMIsNonInterleaved: false,
-            ]
-            output.setSampleBufferDelegate(self, queue: audioQueue)
-            if captureSession.canAddOutput(output) {
-                captureSession.addOutput(output)
-                audioOutput = output
-                hasAudioInput = true
-                print("[Capture] Audio input set: \(device.localizedName)")
-            } else {
-                print("[Capture] Could not add audio output for \(device.localizedName)")
-            }
+        // Add the input first. If this fails (e.g. stale device reference after a
+        // USB unplug/replug), bail out entirely — adding an audio data output
+        // without an input would just sit there delivering nothing while the UI
+        // happily reported "audio active". That's the bug that made the meters
+        // freeze + the saved replay go silent after reconnect.
+        let input: AVCaptureDeviceInput
+        do {
+            input = try AVCaptureDeviceInput(device: device)
+        } catch {
+            print("[Capture] Could not create audio input for \(device.localizedName): \(error)")
+            return false
         }
+        guard captureSession.canAddInput(input) else {
+            print("[Capture] Session refused audio input for \(device.localizedName)")
+            return false
+        }
+        captureSession.addInput(input)
+        audioDeviceInput = input
 
-        captureSession.commitConfiguration()
+        let output = AVCaptureAudioDataOutput()
+        // Force Float32 interleaved so metering + passthrough get a known format
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        output.setSampleBufferDelegate(self, queue: audioQueue)
+        guard captureSession.canAddOutput(output) else {
+            print("[Capture] Could not add audio output for \(device.localizedName) — removing the input we just added")
+            captureSession.removeInput(input)
+            audioDeviceInput = nil
+            return false
+        }
+        captureSession.addOutput(output)
+        audioOutput = output
+        hasAudioInput = true
+        print("[Capture] Audio input set: \(device.localizedName)")
+        return true
     }
 
     /// Remove audio output and any separate audio device input from the session.
@@ -518,19 +567,28 @@ public final class CaptureEngine: NSObject {
         } else {
             do {
                 // Build format description from replay buffer so AVAssetWriterInput
-                // gets the required sourceFormatHint for passthrough MP4 writing.
+                // gets the required sourceFormatHint for passthrough writing.
+                // ProRes frames carry their own format description; H.264 requires
+                // reconstructing one from the SPS/PPS parameter sets.
                 let frames = replayBuffer.getReplayFrames(lastSeconds: 1)
                 let formatHint: CMFormatDescription?
-                if let keyframe = frames.first(where: { $0.isKeyframe }),
-                   let ps = keyframe.parameterSets {
-                    formatHint = makeFormatDescription(parameterSets: ps)
+                if let keyframe = frames.first(where: { $0.isKeyframe }) {
+                    if let fd = keyframe.formatDescription {
+                        formatHint = fd
+                    } else if let ps = keyframe.parameterSets {
+                        formatHint = makeFormatDescription(parameterSets: ps)
+                    } else {
+                        formatHint = nil
+                    }
                 } else {
                     formatHint = nil
                 }
                 recordingFormatLock.lock()
                 recordingFormatDesc = formatHint
                 recordingFormatLock.unlock()
-                try recorder.startRecording(sourceFormatHint: formatHint, audioFormatHint: audioFormatDesc)
+                try recorder.startRecording(codec: codec,
+                                            sourceFormatHint: formatHint,
+                                            audioFormatHint: audioFormatDesc)
                 DispatchQueue.main.async { self.onStateChange?() }
             } catch {
                 print("[Capture] Failed to start recording: \(error)")
@@ -558,7 +616,8 @@ public final class CaptureEngine: NSObject {
         }
 
         let stats = replayBuffer.stats
-        let filename = Recorder.timestampedFilename(prefix: "replay", ext: "mp4")
+        let activeCodec = codec
+        let filename = Recorder.timestampedFilename(prefix: "replay", ext: activeCodec.fileExtension)
         let url = recorder.outputDir.appendingPathComponent(filename)
 
         print("[Capture] Saving replay (\(String(format: "%.1f", stats.duration))s, \(replayData.video.count) frames, \(replayData.audio.count) audio samples)...")
@@ -566,7 +625,8 @@ public final class CaptureEngine: NSObject {
         // Write on a background task so we don't block the main thread
         let onChange = onStateChange
         Task.detached { [weak self] in
-            let success = await Recorder.writeFrames(replayData.video, audioSamples: replayData.audio, to: url)
+            let success = await Recorder.writeFrames(replayData.video, audioSamples: replayData.audio,
+                                                     to: url, fileType: activeCodec.fileType)
             if success {
                 print("[Capture] Replay saved: \(url.path)")
             } else {
@@ -655,8 +715,14 @@ public final class CaptureEngine: NSObject {
 
         if recorder.isRecording {
             recordingFormatLock.lock()
-            if frame.isKeyframe, recordingFormatDesc == nil, let ps = frame.parameterSets {
-                recordingFormatDesc = makeFormatDescription(parameterSets: ps)
+            if recordingFormatDesc == nil {
+                if let fd = frame.formatDescription {
+                    // ProRes — format description is intrinsic to every frame.
+                    recordingFormatDesc = fd
+                } else if frame.isKeyframe, let ps = frame.parameterSets {
+                    // H.264 — reconstruct from SPS/PPS in this keyframe.
+                    recordingFormatDesc = makeFormatDescription(parameterSets: ps)
+                }
             }
             let fmt = recordingFormatDesc
             recordingFormatLock.unlock()

@@ -15,17 +15,18 @@ public final class Recorder {
         self.outputDir = outputDir ?? Recorder.defaultOutputDir()
     }
 
-    /// Start recording to a new MP4 file. Returns the file path.
+    /// Start recording to a new MP4/MOV file. Returns the file path.
     @discardableResult
     public func startRecording(width: Int = 1920, height: Int = 1080,
+                               codec: CaptureCodec = .h264,
                                sourceFormatHint: CMFormatDescription? = nil,
                                audioFormatHint: CMFormatDescription? = nil) throws -> URL {
-        let filename = Recorder.timestampedFilename(prefix: "recording", ext: "mp4")
+        let filename = Recorder.timestampedFilename(prefix: "recording", ext: codec.fileExtension)
         let url = outputDir.appendingPathComponent(filename)
 
         try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let writer = try AVAssetWriter(outputURL: url, fileType: codec.fileType)
 
         // nil outputSettings = passthrough (we provide already-encoded H.264 data)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
@@ -125,13 +126,41 @@ public final class Recorder {
     /// to interleave with) — that's the deadlock this code is designed to avoid.
     public static func writeFrames(_ frames: [EncodedFrame], audioSamples: [AudioSample] = [],
                             to url: URL,
+                            fileType: AVFileType = .mp4,
                             width: Int = 1920, height: Int = 1080) async -> Bool {
         // Drop any leading non-keyframes — the writer can't start mid-GOP
         let startIdx = frames.firstIndex(where: { $0.isKeyframe }) ?? frames.count
-        let usable = Array(frames[startIdx...])
+        var usable = Array(frames[startIdx...])
         guard !usable.isEmpty else {
             print("[Recorder] No keyframes found in \(frames.count) frames, cannot write replay")
             return false
+        }
+
+        // Belt-and-braces against a PTS discontinuity slipping past the replay
+        // buffer's guard. A single stale frame in front of a clock-domain change
+        // would otherwise be written as the file's start and the gap to the next
+        // sample would be encoded as a multi-hour first-frame duration. Keep only
+        // the segment after the last discontinuity, snapped to the next keyframe.
+        var splitIndex = 0
+        for i in 1..<usable.count {
+            let prev = usable[i - 1].pts
+            let curr = usable[i].pts
+            guard prev.isValid, curr.isValid else { splitIndex = i; continue }
+            let gap = CMTimeGetSeconds(CMTimeSubtract(curr, prev))
+            if !gap.isFinite || abs(gap) > 5.0 {
+                splitIndex = i
+            }
+        }
+        if splitIndex > 0 {
+            while splitIndex < usable.count && !usable[splitIndex].isKeyframe {
+                splitIndex += 1
+            }
+            guard splitIndex < usable.count else {
+                print("[Recorder] PTS discontinuity but no trailing keyframe — cannot write replay")
+                return false
+            }
+            print("[Recorder] PTS discontinuity in replay buffer — skipping \(splitIndex) stale frames, keeping \(usable.count - splitIndex)")
+            usable = Array(usable[splitIndex...])
         }
 
         do {
@@ -141,9 +170,16 @@ public final class Recorder {
             // Overwrite any leftover file at this path (e.g. an empty file from a previous hung save)
             try? FileManager.default.removeItem(at: url)
 
-            let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+            let writer = try AVAssetWriter(outputURL: url, fileType: fileType)
 
-            guard let formatDesc = createFormatDescription(from: usable[0]) else {
+            // Intra-only codecs (ProRes) carry the format description on every
+            // frame; H.264 keyframes need it reassembled from SPS/PPS.
+            let formatDesc: CMFormatDescription
+            if let fd = usable[0].formatDescription {
+                formatDesc = fd
+            } else if let fd = createFormatDescription(from: usable[0]) {
+                formatDesc = fd
+            } else {
                 print("[Recorder] Failed to create format description")
                 return false
             }
@@ -197,6 +233,11 @@ public final class Recorder {
             let videoQueue = DispatchQueue(label: "elgato.replay.write.video")
             let audioQueue = DispatchQueue(label: "elgato.replay.write.audio")
 
+            // Watchdog timeout for finishWriting. If finalisation hangs (disk stall, FUSE
+            // wedge, sandbox glitch), we cancel the writer and resume with failure rather
+            // than blocking the awaiter forever.
+            let finishTimeoutSeconds: Double = 10
+
             return await withCheckedContinuation { continuation in
                 let stateLock = NSLock()
                 var videoDone = false
@@ -206,6 +247,9 @@ public final class Recorder {
                 var videoWritten = 0
                 var audioWritten = 0
                 var continuationResumed = false
+                // Separate flag guarding the actual continuation.resume call. The
+                // finishWriting callback and the watchdog race for this; exactly one wins.
+                var resumeCompleted = false
 
                 func finalizeIfReady() {
                     stateLock.lock()
@@ -215,7 +259,32 @@ public final class Recorder {
                     guard canFinalize else { return }
 
                     print("[Recorder] Finalizing replay (\(videoWritten) video, \(audioWritten) audio)")
+
+                    // Schedule the watchdog before invoking finishWriting so we cover the
+                    // entire finalisation window. cancelWriting() is documented thread-safe.
+                    let watchdog = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+                    watchdog.schedule(deadline: .now() + finishTimeoutSeconds)
+                    watchdog.setEventHandler {
+                        stateLock.lock()
+                        let shouldResume = !resumeCompleted
+                        if shouldResume { resumeCompleted = true }
+                        stateLock.unlock()
+                        guard shouldResume else { return }
+                        print("[Recorder] finishWriting timed out after \(Int(finishTimeoutSeconds))s — resuming with failure")
+                        writer.cancelWriting()
+                        continuation.resume(returning: false)
+                    }
+                    watchdog.resume()
+
                     writer.finishWriting {
+                        stateLock.lock()
+                        let shouldResume = !resumeCompleted
+                        if shouldResume { resumeCompleted = true }
+                        stateLock.unlock()
+                        // Cancel the watchdog regardless — if we lost the race it's already
+                        // fired, but cancelling an already-fired one-shot timer is a no-op.
+                        watchdog.cancel()
+                        guard shouldResume else { return }
                         let success = writer.status == .completed
                         if !success {
                             print("[Recorder] Replay write failed: \(writer.error?.localizedDescription ?? "unknown")")
@@ -303,10 +372,15 @@ public final class Recorder {
         return movies.appendingPathComponent("ElgatoCapture")
     }
 
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
     public static func timestampedFilename(prefix: String, ext: String) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
-        return "\(prefix)_\(formatter.string(from: Date())).\(ext)"
+        return "\(prefix)_\(Self.timestampFormatter.string(from: Date())).\(ext)"
     }
 
     /// Create a CMFormatDescription from encoded H.264 parameter sets.

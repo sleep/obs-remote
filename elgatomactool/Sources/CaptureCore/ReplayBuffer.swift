@@ -26,17 +26,62 @@ public final class ReplayBuffer {
         trimLocked()
     }
 
+    /// A PTS gap larger than this between consecutive samples signals a
+    /// clock-domain change (e.g. USB replug where the new capture session's
+    /// host-time samples land in a different epoch from the surviving
+    /// pre-replug ones). The normal trim can't shed those: its keyframe-search
+    /// walks backward and stalls when the frame right after the stale one is a
+    /// P-frame. A surviving stale frame later becomes the saved replay's start
+    /// frame, and AVAssetWriter fills the gap with one multi-hour sample.
+    private static let discontinuityThresholdSeconds: Double = 5.0
+
     public func append(_ frame: EncodedFrame) {
         lock.lock()
         defer { lock.unlock() }
+
+        if let last = frames.last,
+           ReplayBuffer.isDiscontinuity(from: last.pts, to: frame.pts) {
+            print("[ReplayBuffer] Video PTS discontinuity — dropping \(frames.count) stale frames + \(audioSamples.count) audio samples")
+            frames.removeAll(keepingCapacity: true)
+            audioSamples.removeAll(keepingCapacity: true)
+            totalBytes = 0
+            audioBytes = 0
+        }
+
         frames.append(frame)
         totalBytes += frame.size
         trimLocked()
     }
 
+    private static func isDiscontinuity(from: CMTime, to: CMTime) -> Bool {
+        guard from.isValid, to.isValid else { return true }
+        let gap = CMTimeGetSeconds(CMTimeSubtract(to, from))
+        guard gap.isFinite else { return true }
+        return abs(gap) > discontinuityThresholdSeconds
+    }
+
+    /// Drop every buffered frame + audio sample. Called when the codec changes
+    /// — mixed-codec frames can't be muxed into a single output file.
+    public func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        frames.removeAll(keepingCapacity: true)
+        audioSamples.removeAll(keepingCapacity: true)
+        totalBytes = 0
+        audioBytes = 0
+    }
+
     public func appendAudio(_ sample: AudioSample) {
         lock.lock()
         defer { lock.unlock() }
+
+        if let last = audioSamples.last,
+           ReplayBuffer.isDiscontinuity(from: last.pts, to: sample.pts) {
+            print("[ReplayBuffer] Audio PTS discontinuity — dropping \(audioSamples.count) stale audio samples")
+            audioSamples.removeAll(keepingCapacity: true)
+            audioBytes = 0
+        }
+
         audioSamples.append(sample)
         audioBytes += sample.size
         trimAudioLocked()
@@ -129,11 +174,14 @@ public final class ReplayBuffer {
 
         // Also enforce RAM limit: keep removing GOPs from the front if over budget
         if maxBytes > 0 && totalBytes > maxBytes && removeCount < frames.count - 1 {
-            for i in removeCount..<frames.count - 1 {
-                // Estimate remaining bytes after removing up to i+1
-                var remaining = totalBytes
-                for j in 0...i { remaining -= frames[j].size }
+            var remaining = totalBytes
+            // Pre-subtract bytes of frames already slated for removal by the duration cutoff
+            for j in 0..<removeCount { remaining -= frames[j].size }
+            var i = removeCount
+            while i < frames.count - 1 {
+                remaining -= frames[i].size
                 if remaining <= maxBytes { removeCount = i + 1; break }
+                i += 1
             }
         }
 
