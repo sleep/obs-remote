@@ -114,6 +114,16 @@ final class CaptureViewModel: ObservableObject {
             engine.updateBitrate(mbps: bitrateMbps)
         }
     }
+    @Published var captureCodec: CaptureCodec = .h264 {
+        didSet {
+            guard captureCodec != oldValue else { return }
+            settings?.captureCodec = captureCodec
+            engine.setCodec(captureCodec)
+            // Buffer was just cleared — also clear the thumbnail strip so the
+            // UI doesn't keep stills around for content that no longer exists.
+            replayThumbnails = []
+        }
+    }
 
     private weak var settings: AppSettings?
 
@@ -130,10 +140,31 @@ final class CaptureViewModel: ObservableObject {
         ("4 GB", 4096 * 1_048_576),
     ]
 
-    /// Estimated file size in MB for a given duration at the current bitrate.
+    /// Estimated file size in MB for a given duration. Uses the live measured
+    /// bitrate when capture is running (most accurate), falls back to the
+    /// codec's configured/expected bitrate otherwise.
     func estimatedSizeMB(forSeconds seconds: Double) -> Double {
-        // bitrateMbps is megabits/s → divide by 8 for megabytes/s
-        return Double(bitrateMbps) * seconds / 8.0
+        let mbps: Double
+        if liveBitrateMbps > 1.0 {
+            mbps = liveBitrateMbps
+        } else if captureCodec.isLossless {
+            let (w, h, fps) = currentResolutionForEstimate()
+            mbps = captureCodec.estimatedMbps(width: w, height: h, fps: fps)
+        } else {
+            mbps = Double(bitrateMbps)
+        }
+        return mbps * seconds / 8.0
+    }
+
+    /// Best-guess (width, height, fps) for pre-capture file-size estimates.
+    /// Falls back to 1080p60 when no device info is available yet.
+    private func currentResolutionForEstimate() -> (Int, Int, Double) {
+        let parts = captureResolution.split(separator: "x")
+        if parts.count == 2,
+           let w = Int(parts[0]), let h = Int(parts[1]) {
+            return (w, h, liveFPS > 0 ? liveFPS : 60)
+        }
+        return (1920, 1080, 60)
     }
 
     /// Human-readable estimated size string.
@@ -148,7 +179,16 @@ final class CaptureViewModel: ObservableObject {
     /// Maximum duration the chosen RAM cap allows at the current bitrate.
     func maxDurationForRAMCap() -> Double? {
         guard maxReplayRAM > 0 else { return nil }
-        let bytesPerSecond = Double(bitrateMbps) * 1_000_000 / 8.0
+        let mbps: Double
+        if liveBitrateMbps > 1.0 {
+            mbps = liveBitrateMbps
+        } else if captureCodec.isLossless {
+            let (w, h, fps) = currentResolutionForEstimate()
+            mbps = captureCodec.estimatedMbps(width: w, height: h, fps: fps)
+        } else {
+            mbps = Double(bitrateMbps)
+        }
+        let bytesPerSecond = mbps * 1_000_000 / 8.0
         guard bytesPerSecond > 0 else { return nil }
         return Double(maxReplayRAM) / bytesPerSecond
     }
@@ -165,10 +205,19 @@ final class CaptureViewModel: ObservableObject {
     private var settingsCancellables: Set<AnyCancellable> = []
     private var appNapActivity: NSObjectProtocol?
 
-    /// UniqueID of the device we were capturing from before a disconnect.
+    /// UniqueID of the video device we were capturing from before a disconnect.
     private var reconnectDeviceID: String?
+    /// UniqueID of the audio device that was selected at disconnect time. Saved
+    /// separately because the audio half of a USB capture device disconnects with
+    /// its own uniqueID and may come back as a fresh AVCaptureDevice instance.
+    /// Using a stale ref silently fails — the old bug where audio went mute after
+    /// reconnect was caused by feeding a stale reference into AVCaptureDeviceInput.
+    private var reconnectAudioDeviceID: String?
     /// True while attemptReconnect is in progress (waiting or retrying).
     private var isReconnecting = false
+    /// Was the user actively capturing (vs preview-only) at disconnect time?
+    /// Determines whether we restore to full capture or just to preview.
+    private var wasCapturingAtDisconnect = false
     /// Consecutive seconds with 0 FPS while supposedly capturing — triggers reconnect.
     private var zeroFPSStreak: Int = 0
     private static let zeroFPSReconnectThreshold = 3
@@ -178,9 +227,20 @@ final class CaptureViewModel: ObservableObject {
         self.replayDuration = settings.replayDuration
         self.maxReplayRAM = settings.maxReplayRAM
         self.bitrateMbps = settings.bitrateMbps
+        self.captureCodec = settings.captureCodec
         self.engine = CaptureEngine(replayDuration: settings.replayDuration,
-                                    bitrateMbps: settings.bitrateMbps)
+                                    bitrateMbps: settings.bitrateMbps,
+                                    codec: settings.captureCodec)
         engine.setOutputDirectory(settings.outputDirectory)
+
+        // Mirror codec changes made elsewhere (Preferences sheet) into the VM.
+        settings.$captureCodec
+            .receive(on: RunLoop.main)
+            .sink { [weak self] newCodec in
+                guard let self else { return }
+                if self.captureCodec != newCodec { self.captureCodec = newCodec }
+            }
+            .store(in: &settingsCancellables)
 
         engine.onStateChange = { [weak self] in
             Task { @MainActor in
@@ -307,6 +367,35 @@ final class CaptureViewModel: ObservableObject {
         })
     }
 
+    /// Re-fetch a video device by uniqueID from a freshly enumerated discovery
+    /// session. AVCaptureDevice references can go stale across an unplug/replug —
+    /// even when the uniqueID survives, the underlying object may be invalidated,
+    /// so always re-resolve before handing it to AVCaptureSession.
+    private func freshVideoDevice(forID id: String) -> AVCaptureDevice? {
+        DeviceDiscovery.findCaptureDevices().first(where: { $0.uniqueID == id })
+    }
+
+    /// Re-fetch an audio device by uniqueID. Same staleness problem as video,
+    /// and the cause of the silent-after-reconnect bug.
+    private func freshAudioDevice(forID id: String) -> AVCaptureDevice? {
+        DeviceDiscovery.findAudioDevices().first(where: { $0.uniqueID == id })
+    }
+
+    /// Refresh `selectedAudioDevice` so it points at a freshly enumerated
+    /// AVCaptureDevice instance. Returns the resolved device (or nil if it's
+    /// not enumerable yet). Use before any call into `engine.setAudioInputDevice`
+    /// to avoid feeding it a stale reference.
+    @discardableResult
+    private func refreshSelectedAudioDevice() -> AVCaptureDevice? {
+        availableAudioDevices = DeviceDiscovery.findAudioDevices()
+        guard let id = selectedAudioDevice?.uniqueID else { return nil }
+        let fresh = availableAudioDevices.first(where: { $0.uniqueID == id })
+        if let fresh, fresh !== selectedAudioDevice {
+            selectedAudioDevice = fresh
+        }
+        return fresh
+    }
+
     private func autoSelectDevice() -> AVCaptureDevice? {
         let keywords = ["elgato", "cam link", "hd60", "4k60", "game capture"]
         if let match = availableDevices.first(where: { device in
@@ -331,11 +420,14 @@ final class CaptureViewModel: ObservableObject {
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             captureResolution = "\(dims.width)x\(dims.height)"
 
-            // Set up audio from the selected audio device
-            if let audioDevice = selectedAudioDevice {
+            // Set up audio — always re-resolve by uniqueID against a fresh
+            // discovery session to avoid stale AVCaptureDevice refs.
+            if let audioDevice = refreshSelectedAudioDevice() {
                 engine.setAudioInputDevice(audioDevice)
                 hasAudio = engine.hasAudioInput
                 if hasAudio { startAudioMeterTimer() }
+            } else {
+                hasAudio = false
             }
         } catch {
             print("[GUI] Preview failed: \(error)")
@@ -377,11 +469,14 @@ final class CaptureViewModel: ObservableObject {
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             captureResolution = "\(dims.width)x\(dims.height)"
 
-            // Set up audio from the selected audio device
+            // Set up audio — refresh the device ref against a fresh discovery
+            // session first so we don't pass a stale handle into the session.
             stopAudioMeterTimer()
-            if let audioDevice = selectedAudioDevice {
+            if let audioDevice = refreshSelectedAudioDevice() {
                 engine.setAudioInputDevice(audioDevice)
                 hasAudio = engine.hasAudioInput
+            } else {
+                hasAudio = false
             }
 
             startStatusTimer()
@@ -395,6 +490,13 @@ final class CaptureViewModel: ObservableObject {
     }
 
     func stopCapture() {
+        // Cancel any in-flight reconnect — without this, a pending retry would
+        // fire after stop() and silently restart capture.
+        reconnectDeviceID = nil
+        reconnectAudioDeviceID = nil
+        isReconnecting = false
+        wasCapturingAtDisconnect = false
+
         engine.stop()
         isCapturing = false
         deviceDisconnected = false
@@ -585,44 +687,87 @@ final class CaptureViewModel: ObservableObject {
 
     private func handleDeviceDisconnected(_ notification: Notification) {
         guard let device = notification.object as? AVCaptureDevice else { return }
-        print("[GUI] Device disconnected: \(device.localizedName)")
+        print("[GUI] Device disconnected: \(device.localizedName) (\(device.uniqueID))")
 
-        let wasOurDevice = device.uniqueID == selectedDevice?.uniqueID
+        let wasOurVideoDevice = device.uniqueID == selectedDevice?.uniqueID
+        let wasOurAudioDevice = device.uniqueID == selectedAudioDevice?.uniqueID
 
-        if wasOurDevice {
-            reconnectDeviceID = device.uniqueID
+        // The audio half of a USB capture device disconnects with its own
+        // uniqueID. Save the ID up front so reconnect can re-resolve it; without
+        // this we'd keep using the stale AVCaptureDevice ref and silently lose
+        // audio after replug.
+        if wasOurAudioDevice {
+            reconnectAudioDeviceID = device.uniqueID
+        }
 
-            // Stop the engine cleanly (tears down encoder + session) but the replay
-            // buffer is NOT cleared by stop(), so existing frames survive for saving.
-            // Keep isCapturing = true so the UI still shows stats/controls/buffer info.
-            if isCapturing {
-                engine.stop()
-                // stop() falls back to "preview" with the stale device input still attached.
-                // Force a full teardown so reconnect does a clean start, not a broken upgrade.
-                engine.stopPreview()
-                stopStatusTimer()
+        if wasOurVideoDevice {
+            beginReconnect(forVideoID: device.uniqueID)
+        } else if wasOurAudioDevice {
+            // Audio-only device disappeared (separate from video). If we're
+            // still capturing video, drop the audio output cleanly so we don't
+            // sit on a stale input. The reconnect handler will re-attach when
+            // the audio device returns.
+            engine.setAudioInputDevice(nil)
+            hasAudio = false
+            availableAudioDevices = DeviceDiscovery.findAudioDevices()
+            // Start the reconnect machinery anchored on the video device if any
+            // — otherwise the next AVCaptureDeviceWasConnected for the audio
+            // half can be handled by attemptReconnect via the polling loop.
+            if let videoID = selectedDevice?.uniqueID,
+               reconnectDeviceID == nil {
+                beginReconnect(forVideoID: videoID)
             }
-
-            stopThumbnailTimer()
-            deviceDisconnected = true
-            statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
-            errorMessage = nil
         } else {
             availableDevices = DeviceDiscovery.findCaptureDevices()
+            availableAudioDevices = DeviceDiscovery.findAudioDevices()
+        }
+    }
+
+    /// Tear down the live pipeline and start the reconnect retry loop. Idempotent.
+    private func beginReconnect(forVideoID videoID: String) {
+        // If audio belongs to the same physical device (Cam Link etc.), record its
+        // uniqueID so we can re-resolve it on reconnect even if its disconnect
+        // notification hasn't fired yet.
+        if reconnectAudioDeviceID == nil,
+           let audioID = selectedAudioDevice?.uniqueID {
+            reconnectAudioDeviceID = audioID
+        }
+
+        wasCapturingAtDisconnect = isCapturing
+        reconnectDeviceID = videoID
+
+        // Tear the pipeline down completely. The replay buffer is NOT cleared,
+        // so already-captured frames survive for a manual save.
+        if isCapturing || isPreviewing {
+            engine.stop()
+            engine.stopPreview()
+            stopStatusTimer()
+        }
+
+        stopThumbnailTimer()
+        deviceDisconnected = true
+        statusMessage = "Device disconnected — buffer preserved, waiting to reconnect..."
+        errorMessage = nil
+
+        // Don't wait for AVCaptureDeviceWasConnected — those notifications can
+        // arrive before the device is enumerable in DiscoverySession (or be
+        // missed entirely when audio+video halves race). The internal retry
+        // loop polls every 0.5s until the device shows up.
+        if !isReconnecting {
+            attemptReconnect(deviceID: videoID, delay: 0.3)
         }
     }
 
     private func handleDeviceConnected() {
-        print("[GUI] Device connected")
+        print("[GUI] Device connected notification")
 
-        // Ignore duplicate connect events if we're already reconnecting
+        // While reconnecting, the retry loop is already polling — nothing to do.
         if isReconnecting { return }
 
-        if let targetID = reconnectDeviceID {
-            availableDevices = DeviceDiscovery.findCaptureDevices()
-            if availableDevices.contains(where: { $0.uniqueID == targetID }) {
-                attemptReconnect(deviceID: targetID, delay: 0.3)
-            }
+        if reconnectDeviceID != nil {
+            // Reconnect state set but loop not running (shouldn't happen with the
+            // immediate-start in beginReconnect, but be defensive).
+            attemptReconnect(deviceID: reconnectDeviceID!, delay: 0.0)
         } else {
             refreshDevices()
         }
@@ -634,43 +779,89 @@ final class CaptureViewModel: ObservableObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            // Bail if the user switched devices or reconnect was cancelled
+            // Bail if the user cancelled / switched devices / stopped capture
             guard self.reconnectDeviceID == deviceID else {
                 self.isReconnecting = false
                 return
             }
 
-            // Refresh the device object (may have changed across unplug/replug)
+            // Refresh both device lists. AVFoundation can take a beat to publish
+            // a re-plugged device, so each iteration looks fresh.
             self.availableDevices = DeviceDiscovery.findCaptureDevices()
+            self.availableAudioDevices = DeviceDiscovery.findAudioDevices()
+
             guard let fresh = self.availableDevices.first(where: { $0.uniqueID == deviceID }) else {
-                // Device not found yet — retry forever with short delay
+                // Device not enumerable yet — keep polling.
                 self.attemptReconnect(deviceID: deviceID, delay: 0.5)
                 return
             }
+
+            // selectedDevice's didSet skips when uniqueID matches, which is what
+            // we want — no preview-restart side effect during reconnect.
             self.selectedDevice = fresh
 
             do {
-                try self.engine.start(with: fresh)
+                if self.wasCapturingAtDisconnect {
+                    try self.engine.start(with: fresh)
+                    self.isCapturing = true
+                    self.startStatusTimer()
+                    self.startThumbnailTimer()
+                } else {
+                    try self.engine.startPreview(with: fresh)
+                    self.isPreviewing = true
+                }
                 self.reconnectDeviceID = nil
                 self.isReconnecting = false
                 self.deviceDisconnected = false
-                self.isCapturing = true
                 self.errorMessage = nil
-                self.statusMessage = "Capturing from \(fresh.localizedName)"
+                self.statusMessage = self.wasCapturingAtDisconnect
+                    ? "Capturing from \(fresh.localizedName)"
+                    : "Preview from \(fresh.localizedName)"
                 let dims = CMVideoFormatDescriptionGetDimensions(fresh.activeFormat.formatDescription)
                 self.captureResolution = "\(dims.width)x\(dims.height)"
-                // Re-attach audio
-                if let audioDevice = self.selectedAudioDevice {
-                    self.engine.setAudioInputDevice(audioDevice)
-                    self.hasAudio = self.engine.hasAudioInput
-                }
-                self.startStatusTimer()
-                self.startThumbnailTimer()
-                print("[GUI] Reconnected successfully")
+
+                // Re-attach audio using a FRESHLY resolved AVCaptureDevice. The
+                // pre-disconnect reference is invalid post-replug — passing it
+                // into AVCaptureDeviceInput throws silently and the meters stay
+                // flat (that's the "audio dies after reconnect" bug).
+                self.reattachAudioAfterReconnect()
+                self.wasCapturingAtDisconnect = false
+                print("[GUI] Reconnected successfully (audio: \(self.hasAudio ? "yes" : "no"))")
             } catch {
                 print("[GUI] Reconnect attempt failed: \(error) — retrying")
                 self.attemptReconnect(deviceID: deviceID, delay: 0.5)
             }
+        }
+    }
+
+    /// Look up the audio device by the uniqueID recorded at disconnect time and
+    /// re-attach it. Falls back to `selectedAudioDevice`'s uniqueID for setups
+    /// where audio was selected but never disconnected.
+    private func reattachAudioAfterReconnect() {
+        let targetID = reconnectAudioDeviceID ?? selectedAudioDevice?.uniqueID
+        guard let targetID else {
+            hasAudio = false
+            return
+        }
+
+        if let fresh = freshAudioDevice(forID: targetID) {
+            // Update the stored ref so it points at the fresh instance. didSet
+            // skips re-firing because uniqueID is unchanged — we drive the
+            // engine call explicitly below.
+            if fresh !== selectedAudioDevice {
+                selectedAudioDevice = fresh
+            }
+            let ok = engine.setAudioInputDevice(fresh)
+            hasAudio = ok && engine.hasAudioInput
+            if !ok {
+                print("[GUI] Audio re-attach failed — device may still be settling")
+            }
+            reconnectAudioDeviceID = nil
+        } else {
+            // Audio device not enumerable yet. Don't lose the ID — leave it set
+            // so the user can retry, and report no audio for now.
+            hasAudio = false
+            print("[GUI] Audio device \(targetID) not yet available post-reconnect")
         }
     }
 
