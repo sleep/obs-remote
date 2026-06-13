@@ -304,7 +304,19 @@ public final class HardwareEncoder {
                                      totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
 
         guard let dataPointer, totalLength > 0 else { return }
-        let data = Data(bytes: dataPointer, count: totalLength)
+        // Wrap the CMBlockBuffer's bytes without copying. Retain the block buffer
+        // for the Data's lifetime: the deallocator closure captures it, so when
+        // Data is freed the closure goes out of scope and the CMBlockBuffer
+        // release fires. Downstream consumers (ReplayBuffer, Recorder) only
+        // read these bytes — never mutate — so CoW won't trigger a copy.
+        let retainedBuffer = dataBuffer
+        let data = Data(
+            bytesNoCopy: UnsafeMutableRawPointer(dataPointer),
+            count: totalLength,
+            deallocator: .custom { _, _ in
+                _ = retainedBuffer  // keep retainedBuffer alive until Data is freed
+            }
+        )
 
         // H.264 keyframes carry SPS/PPS that the recorder later turns back into
         // a CMFormatDescription. Intra-only codecs (ProRes) hand us a complete

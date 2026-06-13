@@ -140,11 +140,14 @@ public final class ReplayBuffer {
 
         // Also enforce RAM limit: keep removing GOPs from the front if over budget
         if maxBytes > 0 && totalBytes > maxBytes && removeCount < frames.count - 1 {
-            for i in removeCount..<frames.count - 1 {
-                // Estimate remaining bytes after removing up to i+1
-                var remaining = totalBytes
-                for j in 0...i { remaining -= frames[j].size }
+            var remaining = totalBytes
+            // Pre-subtract bytes of frames already slated for removal by the duration cutoff
+            for j in 0..<removeCount { remaining -= frames[j].size }
+            var i = removeCount
+            while i < frames.count - 1 {
+                remaining -= frames[i].size
                 if remaining <= maxBytes { removeCount = i + 1; break }
+                i += 1
             }
         }
 
