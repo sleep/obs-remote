@@ -216,35 +216,11 @@ final class RemoteServer: @unchecked Sendable {
     private func route(_ request: HTTPRequest) async -> HTTPResponse {
         let psk = request.query["k"] ?? request.headers["x-psk"]
 
-        // Service worker, manifest, and icons must be reachable without re-auth so the
-        // installed PWA can boot; the app shell itself still gates the API with the PSK.
-        switch request.path {
-        case "/sw.js":
-            return staticAsset("sw.js")
-        case "/manifest.webmanifest":
-            return manifest(psk: psk)
-        case "/icon-180.png":
-            return await iconResponse(size: 180)
-        case "/icon-192.png":
-            return await iconResponse(size: 192)
-        case "/icon-512.png":
-            return await iconResponse(size: 512)
-        case "/favicon.ico":
-            return HTTPResponse(status: 204)
-        case "/api/ping":
-            return .json(Data("{\"ok\":true}".utf8))
-        default:
-            break
-        }
-
-        // Everything else requires a valid PSK.
-        guard routes.validate(psk) else {
-            if request.path.hasPrefix("/api/") {
-                return .json(Data("{\"error\":\"unauthorized\"}".utf8), status: 401)
-            }
-            return unlockPage()
-        }
-
+        // The static shell (HTML/CSS/JS), service worker, manifest, and icons are
+        // served without auth so the page can boot and the browser can fetch its
+        // relative assets without re-stamping the PSK on each URL. The PSK gates
+        // /api/* — the actual control surface and data — and the JS shell shows
+        // the locked overlay until the API accepts the key.
         switch (request.method, request.path) {
         case ("GET", "/"), ("GET", "/index.html"):
             return staticAsset("index.html")
@@ -252,6 +228,30 @@ final class RemoteServer: @unchecked Sendable {
             return staticAsset("app.css")
         case ("GET", "/app.js"):
             return staticAsset("app.js")
+        case ("GET", "/sw.js"):
+            return staticAsset("sw.js")
+        case ("GET", "/manifest.webmanifest"):
+            return manifest(psk: psk)
+        case ("GET", "/icon-180.png"):
+            return await iconResponse(size: 180)
+        case ("GET", "/icon-192.png"):
+            return await iconResponse(size: 192)
+        case ("GET", "/icon-512.png"):
+            return await iconResponse(size: 512)
+        case ("GET", "/favicon.ico"):
+            return HTTPResponse(status: 204)
+        case ("GET", "/api/ping"):
+            return .json(Data("{\"ok\":true}".utf8))
+        default:
+            break
+        }
+
+        // Everything else (the API) requires a valid PSK.
+        guard routes.validate(psk) else {
+            return .json(Data("{\"error\":\"unauthorized\"}".utf8), status: 401)
+        }
+
+        switch (request.method, request.path) {
         case ("GET", "/api/state"):
             return .json(await routes.state())
         case ("GET", "/api/preview.jpg"):
@@ -311,28 +311,6 @@ final class RemoteServer: @unchecked Sendable {
         }
         """
         return HTTPResponse(status: 200, contentType: "application/manifest+json", body: Data(json.utf8))
-    }
-
-    private func unlockPage() -> HTTPResponse {
-        let html = """
-        <!doctype html><html><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-        <title>Locked</title>
-        <style>
-          body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
-            background:#07060d;color:#e7e3ff;font-family:-apple-system,system-ui,sans-serif;text-align:center}
-          .card{padding:32px;max-width:300px}
-          h1{font-size:20px;margin:.5em 0;background:linear-gradient(90deg,#ff6ec7,#00f5ff);
-            -webkit-background-clip:text;background-clip:text;color:transparent}
-          p{color:#9a93c4;font-size:14px;line-height:1.5}
-        </style></head>
-        <body><div class="card">
-          <div style="font-size:48px">🔒</div>
-          <h1>Access key required</h1>
-          <p>This remote is protected. Scan the QR code shown in Elgato Capture on your Mac to open it.</p>
-        </div></body></html>
-        """
-        return HTTPResponse(status: 401, contentType: "text/html; charset=utf-8", body: Data(html.utf8))
     }
 
     // MARK: - Sending
