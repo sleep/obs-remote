@@ -66,12 +66,19 @@ struct DeviceSelectorView: View {
                     }
                     .help("Refresh device list")
 
-                    Button {
-                        onOpenSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
+                    if #available(macOS 14.0, *) {
+                        SettingsLink {
+                            Image(systemName: "gearshape")
+                        }
+                        .help("Preferences")
+                    } else {
+                        Button {
+                            onOpenSettings()
+                        } label: {
+                            Image(systemName: "gearshape")
+                        }
+                        .help("Preferences")
                     }
-                    .help("Preferences")
 
                     Button {
                         onOpenRemote()
