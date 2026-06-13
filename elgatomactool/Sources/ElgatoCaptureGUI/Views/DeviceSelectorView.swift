@@ -20,21 +20,42 @@ struct DeviceSelectorView: View {
             // Video device row
             devicePickerRow(
                 icon: "video.fill",
-                picker: Picker("Device", selection: $devices.selectedDevice) {
+                picker: Menu {
                     if devices.availableDevices.isEmpty {
-                        Text("No devices").tag(nil as AVCaptureDevice?)
+                        Text("No devices")
                     }
                     ForEach(devices.availableDevices, id: \.uniqueID) { device in
-                        HStack {
+                        Button {
+                            devices.selectedDevice = device
+                        } label: {
                             if ViewFormatters.isElgatoDevice(device) {
                                 Image(systemName: "star.fill")
-                                    .foregroundStyle(.yellow)
                             }
                             Text(device.localizedName)
+                            if device.uniqueID == devices.selectedDevice?.uniqueID {
+                                Image(systemName: "checkmark")
+                            }
                         }
-                        .tag(device as AVCaptureDevice?)
                     }
-                },
+                } label: {
+                    HStack(spacing: 4) {
+                        if let selected = devices.selectedDevice,
+                           ViewFormatters.isElgatoDevice(selected) {
+                            Image(systemName: "star.fill")
+                                .foregroundStyle(.yellow)
+                        }
+                        Text(devices.selectedDevice?.localizedName
+                             ?? (devices.availableDevices.isEmpty ? "No devices" : "Select…"))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize(horizontal: false, vertical: true),
                 buttons: HStack(spacing: 6) {
                     Button {
                         onRefresh()
@@ -72,19 +93,46 @@ struct DeviceSelectorView: View {
             // Audio device row
             devicePickerRow(
                 icon: "waveform",
-                picker: Picker("Audio", selection: $devices.selectedAudioDevice) {
-                    Text("None").tag(nil as AVCaptureDevice?)
+                picker: Menu {
+                    Button {
+                        devices.selectedAudioDevice = nil
+                    } label: {
+                        Text("None")
+                        if devices.selectedAudioDevice == nil {
+                            Image(systemName: "checkmark")
+                        }
+                    }
                     ForEach(devices.availableAudioDevices, id: \.uniqueID) { device in
-                        HStack {
+                        Button {
+                            devices.selectedAudioDevice = device
+                        } label: {
                             if ViewFormatters.isElgatoDevice(device) {
                                 Image(systemName: "star.fill")
-                                    .foregroundStyle(.yellow)
                             }
                             Text(device.localizedName)
+                            if device.uniqueID == devices.selectedAudioDevice?.uniqueID {
+                                Image(systemName: "checkmark")
+                            }
                         }
-                        .tag(device as AVCaptureDevice?)
                     }
-                },
+                } label: {
+                    HStack(spacing: 4) {
+                        if let selected = devices.selectedAudioDevice,
+                           ViewFormatters.isElgatoDevice(selected) {
+                            Image(systemName: "star.fill")
+                                .foregroundStyle(.yellow)
+                        }
+                        Text(devices.selectedAudioDevice?.localizedName ?? "None")
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize(horizontal: false, vertical: true),
                 buttons: HStack(spacing: 6) {
                     Button {
                         onRefresh()

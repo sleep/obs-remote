@@ -27,15 +27,56 @@ struct RecordControlsView: View {
     }
 }
 
+// MARK: - Shared ButtonStyles
+
+/// Card-shaped capture control button: rounded background that flips between
+/// a neutral resting fill and a tinted active fill, with system-standard press
+/// feedback (subtle opacity + scale dip). Used by Record and Screenshot.
+private struct CaptureCardButtonStyle: ButtonStyle {
+    var tint: Color
+    var isActive: Bool
+    var width: CGFloat = 72
+    var height: CGFloat = 60
+    var cornerRadius: CGFloat = 8
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isActive ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
+            .frame(width: width, height: height)
+            .padding(6)
+            .background(
+                isActive
+                    ? AnyShapeStyle(tint.opacity(0.12))
+                    : AnyShapeStyle(.quaternary.opacity(0.5)),
+                in: RoundedRectangle(cornerRadius: cornerRadius)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+/// Press feedback only (no background) — for buttons that live inside a shared
+/// container (e.g. the Save / chevron pair inside ReplayButton).
+private struct CapturePressButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Buttons
+
 /// Record/stop button. Observes only RecordingVM.
 private struct RecordButton: View {
     @ObservedObject var recording: RecordingVM
     let onToggle: () -> Void
 
     var body: some View {
-        Button {
-            onToggle()
-        } label: {
+        Button(action: onToggle) {
             VStack(spacing: 3) {
                 if recording.isRecording {
                     Circle()
@@ -59,18 +100,8 @@ private struct RecordButton: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .foregroundStyle(recording.isRecording ? .red : .primary)
-            .frame(width: 72, height: 60)
-            .padding(6)
-            .background(
-                recording.isRecording
-                    ? AnyShapeStyle(.red.opacity(0.12))
-                    : AnyShapeStyle(.quaternary.opacity(0.5)),
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CaptureCardButtonStyle(tint: .red, isActive: recording.isRecording))
     }
 }
 
@@ -79,18 +110,16 @@ private struct ScreenshotButton: View {
     @ObservedObject var replay: ReplayBufferVM
     let onScreenshot: () -> Void
 
+    private var isSuccess: Bool { replay.screenshotFeedback == .success }
+
     var body: some View {
-        Button {
-            onScreenshot()
-        } label: {
+        Button(action: onScreenshot) {
             VStack(spacing: 3) {
-                if replay.screenshotFeedback == .success {
+                if isSuccess {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 20))
-                        .foregroundStyle(.green)
                     Text("Saved!")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.green)
                 } else {
                     Image(systemName: "camera.fill")
                         .font(.system(size: 20))
@@ -101,18 +130,8 @@ private struct ScreenshotButton: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            .foregroundStyle(replay.screenshotFeedback == .success ? .green : .primary)
-            .frame(width: 72, height: 60)
-            .padding(6)
-            .background(
-                replay.screenshotFeedback == .success
-                    ? AnyShapeStyle(.green.opacity(0.12))
-                    : AnyShapeStyle(.quaternary.opacity(0.5)),
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CaptureCardButtonStyle(tint: .green, isActive: isSuccess))
         .disabled(replay.screenshotFeedback == .inProgress)
     }
 }
@@ -124,11 +143,11 @@ private struct ReplayButton: View {
     let onSaveReplay: () -> Void
     let estimatedSizeLabel: (Double) -> String
 
+    private var isSuccess: Bool { replay.replaySaveFeedback == .success }
+
     var body: some View {
         HStack(spacing: 0) {
-            Button {
-                onSaveReplay()
-            } label: {
+            Button(action: onSaveReplay) {
                 VStack(spacing: 2) {
                     if replay.replaySaveFeedback == .success {
                         Image(systemName: "checkmark.circle.fill")
@@ -165,8 +184,9 @@ private struct ReplayButton: View {
                 }
                 .foregroundStyle(.green)
                 .frame(width: 90, height: 60)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CapturePressButtonStyle())
             .disabled(replay.replaySaveFeedback == .inProgress)
 
             Divider()
@@ -184,13 +204,13 @@ private struct ReplayButton: View {
                     .frame(width: 28, height: 60)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CapturePressButtonStyle())
             .help("Replay buffer settings")
         }
         .padding(6)
         .background(
-            replay.replaySaveFeedback == .success
-                ? AnyShapeStyle(.green.opacity(0.12))
+            isSuccess
+                ? AnyShapeStyle(Color.green.opacity(0.12))
                 : AnyShapeStyle(.quaternary.opacity(0.5)),
             in: RoundedRectangle(cornerRadius: 8)
         )
