@@ -8,6 +8,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var viewModel = CaptureViewModel(settings: settings)
     private(set) lazy var statusBarController = StatusBarController(viewModel: viewModel, settings: settings)
     private var didFinishSetup = false
+    private var didHandleStartupHide = false
+    private var isPerformingStartupHide = false
 
     private lazy var appIcon: NSImage = AppIconRenderer.makeIcon()
 
@@ -30,16 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         didFinishSetup = true
 
         NSApp.setActivationPolicy(.regular)
-        if settings.startMinimized {
-            // Hide the auto-opened window without closing it — closing would
-            // trip applicationShouldTerminateAfterLastWindowClosed and flip us
-            // to .accessory, removing the dock icon.
-            DispatchQueue.main.async {
-                for window in NSApp.windows where window.title != "" {
-                    window.orderOut(nil)
-                }
-            }
-        } else {
+        if !settings.startMinimized {
             if #available(macOS 14.0, *) {
                 NSApp.activate()
             } else {
@@ -55,9 +48,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         viewModel.autoConnectLastDevice()
     }
 
+    /// Hide the SwiftUI window that gets auto-opened on launch. Called from the
+    /// WindowGroup's onAppear so the window actually exists by the time we look
+    /// for it. Runs exactly once.
+    func hideStartupWindowIfNeeded() {
+        guard !didHandleStartupHide else { return }
+        didHandleStartupHide = true
+        guard settings.startMinimized else { return }
+
+        // Suppress the accessory-policy flip in
+        // applicationShouldTerminateAfterLastWindowClosed in case AppKit
+        // routes our programmatic hide through that hook.
+        isPerformingStartupHide = true
+        for window in NSApp.windows where window.title != "" {
+            window.orderOut(nil)
+        }
+        // Reassert dock icon — defensive in case the window hide caused a
+        // dock-tile refresh.
+        NSApp.applicationIconImage = appIcon
+        DispatchQueue.main.async { [weak self] in
+            self?.isPerformingStartupHide = false
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep running in menu bar when window is closed
-        NSApp.setActivationPolicy(.accessory)
+        if !isPerformingStartupHide {
+            NSApp.setActivationPolicy(.accessory)
+        }
         return false
     }
 }
@@ -73,7 +91,10 @@ struct ElgatoCaptureApp: App {
             ContentView()
                 .environmentObject(appDelegate.viewModel)
                 .environmentObject(appDelegate.settings)
-                .onAppear { appDelegate.ensureSetup() }
+                .onAppear {
+                    appDelegate.ensureSetup()
+                    appDelegate.hideStartupWindowIfNeeded()
+                }
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 960, height: 620)
