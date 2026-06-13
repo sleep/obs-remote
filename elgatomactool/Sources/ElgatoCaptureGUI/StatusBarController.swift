@@ -11,10 +11,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private var updateTimer: Timer?
 
+    // Cached status-dot icons. The dot only changes when state changes,
+    // so we build these once and reuse them on every tick.
+    private let idleDot: NSImage
+    private let capturingDot: NSImage
+    private let recordingDot: NSImage
+
     init(viewModel: CaptureViewModel, settings: AppSettings) {
         self.viewModel = viewModel
         self.settings = settings
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.idleDot = StatusBarController.makeStatusDot(color: .systemGray)
+        self.capturingDot = StatusBarController.makeStatusDot(color: .systemGreen)
+        self.recordingDot = StatusBarController.makeStatusDot(color: .systemRed)
         super.init()
 
         updateStatusBar()
@@ -55,28 +64,17 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func updateStatusBar() {
         guard let button = statusItem.button else { return }
 
-        let color: NSColor
+        let circleImage: NSImage
         if viewModel.recording.isRecording {
-            color = .systemRed
+            circleImage = recordingDot
         } else if viewModel.recording.isCapturing {
-            color = .systemGreen
+            circleImage = capturingDot
         } else {
-            color = .systemGray
+            circleImage = idleDot
         }
 
         // Build the text portion from enabled fields
         let text = buildStatusText()
-
-        // Draw icon + text as attributed string
-        let circleSize: CGFloat = 10
-        let imageSize = NSSize(width: circleSize + 4, height: 18)
-        let circleImage = NSImage(size: imageSize, flipped: false) { _ in
-            let circleRect = NSRect(x: 2, y: 4, width: circleSize, height: circleSize)
-            color.setFill()
-            NSBezierPath(ovalIn: circleRect).fill()
-            return true
-        }
-        circleImage.isTemplate = false
 
         if text.isEmpty {
             button.image = circleImage
@@ -88,6 +86,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             button.imagePosition = .imageLeading
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         }
+    }
+
+    private static func makeStatusDot(color: NSColor) -> NSImage {
+        let circleSize: CGFloat = 10
+        let imageSize = NSSize(width: circleSize + 4, height: 18)
+        let image = NSImage(size: imageSize, flipped: false) { _ in
+            let circleRect = NSRect(x: 2, y: 4, width: circleSize, height: circleSize)
+            color.setFill()
+            NSBezierPath(ovalIn: circleRect).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     private func buildStatusText() -> String {
