@@ -64,6 +64,9 @@ final class AppSettings: ObservableObject {
         static let outputDirectoryPath = "outputDirectoryPath"
         static let statusBarFields = "statusBarFields"
         static let overlayStats = "overlayStats"
+        static let remoteEnabled = "remoteEnabled"
+        static let remotePort = "remotePort"
+        static let remotePSK = "remotePSK"
     }
 
     private let defaults = UserDefaults.standard
@@ -118,6 +121,34 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(overlayStats.map(\.rawValue), forKey: Keys.overlayStats) }
     }
 
+    // MARK: - Remote control
+
+    /// Whether the remote web server should run (and auto-start on launch).
+    @Published var remoteEnabled: Bool {
+        didSet { defaults.set(remoteEnabled, forKey: Keys.remoteEnabled) }
+    }
+
+    /// Preferred TCP port for the remote web server.
+    @Published var remotePort: Int {
+        didSet { defaults.set(remotePort, forKey: Keys.remotePort) }
+    }
+
+    /// Pre-shared key embedded in the remote URL. Generated once and kept stable
+    /// so installed PWAs keep working across sessions.
+    @Published var remotePSK: String {
+        didSet { defaults.set(remotePSK, forKey: Keys.remotePSK) }
+    }
+
+    /// Generate a URL-safe, human-friendly pre-shared key (no ambiguous chars).
+    static func generatePSK(length: Int = 12) -> String {
+        let alphabet = Array("ABCDEFGHJKMNPQRSTUVWXYZ23456789abcdefghijkmnpqrstuvwxyz")
+        var key = ""
+        for _ in 0..<length {
+            key.append(alphabet[Int.random(in: 0..<alphabet.count)])
+        }
+        return key
+    }
+
     var outputDirectory: URL {
         if let path = outputDirectoryPath, !path.isEmpty {
             return URL(fileURLWithPath: path)
@@ -153,6 +184,16 @@ final class AppSettings: ObservableObject {
         } else {
             // All enabled by default
             self.overlayStats = Set(OverlayStat.allCases)
+        }
+
+        self.remoteEnabled = defaults.object(forKey: Keys.remoteEnabled) as? Bool ?? false
+        self.remotePort = defaults.object(forKey: Keys.remotePort) as? Int ?? 8723
+        if let saved = defaults.string(forKey: Keys.remotePSK), !saved.isEmpty {
+            self.remotePSK = saved
+        } else {
+            let generated = AppSettings.generatePSK()
+            self.remotePSK = generated
+            defaults.set(generated, forKey: Keys.remotePSK)
         }
     }
 }

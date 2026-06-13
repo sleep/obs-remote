@@ -10,8 +10,10 @@ struct DeviceSelectorView: View {
     @ObservedObject var devices: DeviceVM
     @ObservedObject var stats: StatsVM
     let isCapturing: Bool
+    let remoteIsRunning: Bool
     let onRefresh: () -> Void
     let onOpenSettings: () -> Void
+    let onOpenRemote: () -> Void
     let onOpenOutputFolder: () -> Void
     let onStopCapture: () -> Void
 
@@ -70,6 +72,15 @@ struct DeviceSelectorView: View {
                         Image(systemName: "gearshape")
                     }
                     .help("Preferences")
+
+                    Button {
+                        onOpenRemote()
+                    } label: {
+                        Image(systemName: remoteIsRunning
+                              ? "antenna.radiowaves.left.and.right" : "iphone")
+                            .foregroundStyle(remoteIsRunning ? Color.green : Color.secondary)
+                    }
+                    .help("Mobile remote control")
 
                     Button {
                         onOpenOutputFolder()

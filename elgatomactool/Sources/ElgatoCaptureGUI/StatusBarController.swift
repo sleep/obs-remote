@@ -216,6 +216,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         windowItem.target = self
         menu.addItem(windowItem)
 
+        let remoteItem = NSMenuItem(title: "Mobile Remote...", action: #selector(showRemote), keyEquivalent: "")
+        remoteItem.target = self
+        menu.addItem(remoteItem)
+
         let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(showPreferences), keyEquivalent: ",")
         prefsItem.target = self
         menu.addItem(prefsItem)
@@ -286,6 +290,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    @objc private func showRemote() {
+        NSApp.setActivationPolicy(.regular)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if let window = NSApp.windows.first(where: { $0.title != "" }) {
+            window.makeKeyAndOrderFront(nil)
+        }
+        NotificationCenter.default.post(name: .showRemoteSheet, object: nil)
+    }
+
     @objc private func quitApp() {
         NSApp.terminate(nil)
     }
@@ -300,3 +317,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 }
 
+extension Notification.Name {
+    static let showRemoteSheet = Notification.Name("showRemoteSheet")
+}

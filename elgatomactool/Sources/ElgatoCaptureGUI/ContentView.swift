@@ -5,6 +5,7 @@ import CaptureCore
 struct ContentView: View {
     @EnvironmentObject var vm: CaptureViewModel
     @EnvironmentObject var settings: AppSettings
+    @EnvironmentObject var remote: RemoteController
 
     var body: some View {
         // Wave 2: ContentBody composes a tree of small region views. Each region
@@ -17,6 +18,7 @@ struct ContentView: View {
             devices: vm.devices,
             replay: vm.replay,
             recording: vm.recording,
+            remote: remote,
             toast: vm.toast
         )
     }
@@ -29,8 +31,10 @@ private struct ContentBody: View {
     @ObservedObject var devices: DeviceVM
     @ObservedObject var replay: ReplayBufferVM
     @ObservedObject var recording: RecordingVM
+    @ObservedObject var remote: RemoteController
     @ObservedObject var toast: ToastVM
     @State private var showReplaySettings = false
+    @State private var showRemote = false
     @State private var isFullscreen = false
 
     var body: some View {
@@ -42,6 +46,13 @@ private struct ContentBody: View {
             }
         }
         .frame(minWidth: isFullscreen ? nil : 640, minHeight: isFullscreen ? nil : 480)
+        .sheet(isPresented: $showRemote) {
+            RemotePanelView(remote: remote)
+                .environmentObject(settings)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showRemoteSheet)) { _ in
+            showRemote = true
+        }
         .onAppear {
             vm.refreshDevices()
         }
@@ -152,8 +163,10 @@ private struct ContentBody: View {
                         devices: devices,
                         stats: stats,
                         isCapturing: recording.isCapturing,
+                        remoteIsRunning: remote.isRunning,
                         onRefresh: { vm.refreshDevices() },
                         onOpenSettings: { openSettings() },
+                        onOpenRemote: { showRemote = true },
                         onOpenOutputFolder: { vm.openOutputFolder() },
                         onStopCapture: { vm.stopCapture() }
                     )

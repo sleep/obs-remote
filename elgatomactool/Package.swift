@@ -34,6 +34,9 @@ let package = Package(
             name: "elgato-capture-gui",
             dependencies: ["CaptureCore"],
             path: "Sources/ElgatoCaptureGUI",
+            resources: [
+                .copy("WebRoot"),
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
             ]
