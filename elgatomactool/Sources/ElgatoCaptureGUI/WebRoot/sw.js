@@ -1,5 +1,5 @@
 /* Elgato Capture Remote — service worker for PWA / offline shell */
-const CACHE = 'capture-remote-v1';
+const CACHE = 'capture-remote-v2';
 const SHELL = [
   '/',
   '/app.css',
@@ -9,6 +9,7 @@ const SHELL = [
   '/icon-512.png',
   'https://cdn.jsdelivr.net/npm/framework7@8/framework7-bundle.min.css',
   'https://cdn.jsdelivr.net/npm/framework7@8/framework7-bundle.min.js',
+  'https://cdn.jsdelivr.net/npm/framework7-icons@5/css/framework7-icons.css',
 ];
 
 self.addEventListener('install', (e) => {
