@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import CoreImage
 import CoreMedia
 import CaptureCore
 import Combine
@@ -117,6 +118,24 @@ final class CaptureViewModel: ObservableObject {
                 self.engine.setOutputDirectory(settings.outputDirectory)
             }
             .store(in: &settingsCancellables)
+
+        // Visual effects — collapse the master toggle, 4 sliders, and filter
+        // picker into one downstream call so the engine swaps its filter chain
+        // atomically. Fires on subscribe too, so the initial state is pushed
+        // before the first frame arrives.
+        Publishers.MergeMany(
+            settings.$visualEffectsEnabled.map { _ in () }.eraseToAnyPublisher(),
+            settings.$previewBrightness.map { _ in () }.eraseToAnyPublisher(),
+            settings.$previewContrast.map { _ in () }.eraseToAnyPublisher(),
+            settings.$previewSaturation.map { _ in () }.eraseToAnyPublisher(),
+            settings.$previewHueDegrees.map { _ in () }.eraseToAnyPublisher(),
+            settings.$previewFilter.map { _ in () }.eraseToAnyPublisher()
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] in
+            self?.pushVisualEffectsToEngine()
+        }
+        .store(in: &settingsCancellables)
 
         // Watch for USB device connect/disconnect
         NotificationCenter.default.publisher(for: .AVCaptureDeviceWasDisconnected)
@@ -277,6 +296,17 @@ final class CaptureViewModel: ObservableObject {
 
     private func applyReplayLimits() {
         engine.updateReplayLimits(duration: replay.replayDuration, maxBytes: replay.maxReplayRAM)
+    }
+
+    /// Build the CIFilter chain from current settings (or pass empty when the
+    /// master toggle is off / nothing's been changed) and hand it to the engine.
+    private func pushVisualEffectsToEngine() {
+        guard let settings else { return }
+        let filters: [CIFilter] = settings.effectsActive
+            ? VideoFilterChain.buildFilters(adjustments: settings.previewAdjustments,
+                                            filter: settings.previewFilter)
+            : []
+        engine.setVisualEffectFilters(filters)
     }
 
     /// Try to reconnect to the last-used device and optionally start capture.

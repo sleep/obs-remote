@@ -51,7 +51,10 @@ final class PixelBufferNSView: NSView {
     }
 }
 
-/// SwiftUI bridge that displays live frames from the capture engine during capture.
+/// SwiftUI bridge that displays live frames from the capture engine during
+/// capture. Visual effects are baked into the buffer upstream in CaptureEngine
+/// (so display, encoder, and replay all match), so this view does NOT apply any
+/// CALayer.filters — it would double-apply.
 struct PixelBufferDisplayView: NSViewRepresentable {
 
     let engine: CaptureEngine

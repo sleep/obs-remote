@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import CoreImage
 import ImageIO
+import Metal
 import Darwin
 
 /// Orchestrates the full capture pipeline: device -> preview + encoder -> replay buffer / recorder.
@@ -16,6 +17,36 @@ public final class CaptureEngine: NSObject {
     private(set) public var latestPixelBuffer: CVPixelBuffer?
     private let latestFrameLock = NSLock()
     private let thumbnailContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    // MARK: - Visual effects (bake CIFilters into the captured buffer)
+
+    /// CIFilter chain to bake into the captured buffer before encode + display.
+    /// Empty array = pass-through (no per-frame CI work). Guarded by `effectsLock`.
+    private var effectsFilters: [CIFilter] = []
+    private let effectsLock = NSLock()
+
+    /// Lazily-created Metal-backed CIContext used to render the filter chain.
+    private lazy var effectsContext: CIContext? = {
+        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+        return CIContext(mtlDevice: device, options: [
+            .cacheIntermediates: false,
+            .priorityRequestLow: false,
+        ])
+    }()
+
+    /// Pool of BGRA pixel buffers recycled across frames so we don't allocate
+    /// 1080p surfaces 60 times per second.
+    private var effectsPool: CVPixelBufferPool?
+    private var effectsPoolDims: (Int, Int) = (0, 0)
+
+    /// Replace the active filter chain. Pass an empty array to disable the
+    /// effects pipeline entirely (the capture queue then takes the fast path).
+    /// Safe to call from any thread.
+    public func setVisualEffectFilters(_ filters: [CIFilter]) {
+        effectsLock.lock()
+        effectsFilters = filters
+        effectsLock.unlock()
+    }
 
     // Live FPS tracking
     private var frameCount: Int = 0
@@ -744,6 +775,70 @@ public final class CaptureEngine: NSObject {
         }
     }
 
+    // MARK: - Effects rendering
+
+    /// Take a snapshot of the current filter chain. Returns nil when no effects
+    /// are configured so callers can take the fast pass-through path.
+    private func snapshotEffectsFilters() -> [CIFilter]? {
+        effectsLock.lock()
+        let filters = effectsFilters
+        effectsLock.unlock()
+        return filters.isEmpty ? nil : filters
+    }
+
+    /// Render the filter chain over `source` into a recycled BGRA buffer.
+    /// Returns nil on failure — callers fall back to the unfiltered buffer so a
+    /// transient CI error never blanks the recording.
+    private func renderFilteredFrame(_ source: CVPixelBuffer, with filters: [CIFilter]) -> CVPixelBuffer? {
+        guard let context = effectsContext else { return nil }
+
+        let width = CVPixelBufferGetWidth(source)
+        let height = CVPixelBufferGetHeight(source)
+        if effectsPool == nil || effectsPoolDims != (width, height) {
+            let poolAttrs: [CFString: Any] = [
+                kCVPixelBufferPoolMinimumBufferCountKey: 3
+            ]
+            let bufferAttrs: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey: width,
+                kCVPixelBufferHeightKey: height,
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                kCVPixelBufferMetalCompatibilityKey: true,
+            ]
+            var pool: CVPixelBufferPool?
+            let status = CVPixelBufferPoolCreate(
+                kCFAllocatorDefault,
+                poolAttrs as CFDictionary,
+                bufferAttrs as CFDictionary,
+                &pool
+            )
+            guard status == kCVReturnSuccess, let pool else { return nil }
+            effectsPool = pool
+            effectsPoolDims = (width, height)
+        }
+        guard let pool = effectsPool else { return nil }
+
+        var destination: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
+              let outBuffer = destination else {
+            return nil
+        }
+
+        var ci = CIImage(cvPixelBuffer: source)
+        for filter in filters {
+            filter.setValue(ci, forKey: kCIInputImageKey)
+            guard let output = filter.outputImage else { return nil }
+            ci = output
+        }
+
+        // Render in-place. Use the source's color space so colors round-trip
+        // sensibly through the BGRA intermediate.
+        let colorSpace = CVImageBufferGetColorSpace(source)?.takeUnretainedValue()
+            ?? CGColorSpace(name: CGColorSpace.sRGB)
+        context.render(ci, to: outBuffer, bounds: ci.extent, colorSpace: colorSpace)
+        return outBuffer
+    }
+
     private func makeFormatDescription(parameterSets psData: Data) -> CMFormatDescription? {
         let bytes = [UInt8](psData)
         var naluStarts: [Int] = []
@@ -844,11 +939,23 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         // Video path — keep thread at max priority
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
 
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let rawPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         fpsLock.lock()
         frameCount += 1
         fpsLock.unlock()
+
+        // Bake visual effects into the buffer on the capture queue so the same
+        // filtered frame reaches the display, the encoder, the replay buffer,
+        // and any screenshot — they all stay in sync. Falls back to the raw
+        // buffer on render failure so we never drop a frame.
+        let pixelBuffer: CVPixelBuffer
+        if let filters = snapshotEffectsFilters(),
+           let rendered = renderFilteredFrame(rawPixelBuffer, with: filters) {
+            pixelBuffer = rendered
+        } else {
+            pixelBuffer = rawPixelBuffer
+        }
 
         latestFrameLock.lock()
         latestPixelBuffer = pixelBuffer

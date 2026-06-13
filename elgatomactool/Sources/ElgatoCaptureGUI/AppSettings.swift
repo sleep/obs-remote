@@ -67,6 +67,12 @@ final class AppSettings: ObservableObject {
         static let remoteEnabled = "remoteEnabled"
         static let remotePort = "remotePort"
         static let remotePSK = "remotePSK"
+        static let previewBrightness = "previewBrightness"
+        static let previewContrast = "previewContrast"
+        static let previewSaturation = "previewSaturation"
+        static let previewHueDegrees = "previewHueDegrees"
+        static let previewFilter = "previewFilter"
+        static let visualEffectsEnabled = "visualEffectsEnabled"
     }
 
     private let defaults = UserDefaults.standard
@@ -139,6 +145,58 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(remotePSK, forKey: Keys.remotePSK) }
     }
 
+    // MARK: - Preview adjustments
+
+    @Published var previewBrightness: Double {
+        didSet { defaults.set(previewBrightness, forKey: Keys.previewBrightness) }
+    }
+
+    @Published var previewContrast: Double {
+        didSet { defaults.set(previewContrast, forKey: Keys.previewContrast) }
+    }
+
+    @Published var previewSaturation: Double {
+        didSet { defaults.set(previewSaturation, forKey: Keys.previewSaturation) }
+    }
+
+    @Published var previewHueDegrees: Double {
+        didSet { defaults.set(previewHueDegrees, forKey: Keys.previewHueDegrees) }
+    }
+
+    @Published var previewFilter: VideoFilter {
+        didSet { defaults.set(previewFilter.rawValue, forKey: Keys.previewFilter) }
+    }
+
+    /// Master toggle. When false, every visual effect is bypassed — preview AND
+    /// the encode pipeline run on the raw camera buffer, so no per-frame CI work
+    /// happens. Adjustments + filter selection are remembered while disabled.
+    @Published var visualEffectsEnabled: Bool {
+        didSet { defaults.set(visualEffectsEnabled, forKey: Keys.visualEffectsEnabled) }
+    }
+
+    /// Convenience accessor that bundles the four adjustment knobs.
+    var previewAdjustments: VideoAdjustments {
+        VideoAdjustments(
+            brightness: previewBrightness,
+            contrast: previewContrast,
+            saturation: previewSaturation,
+            hueDegrees: previewHueDegrees
+        )
+    }
+
+    /// True when an actual render pass is required — used to short-circuit the
+    /// CIFilter chain when nothing would change.
+    var effectsActive: Bool {
+        visualEffectsEnabled && (!previewAdjustments.isNeutral || previewFilter != .none)
+    }
+
+    func resetPreviewAdjustments() {
+        previewBrightness = 0
+        previewContrast = 1
+        previewSaturation = 1
+        previewHueDegrees = 0
+    }
+
     /// Generate a URL-safe, human-friendly pre-shared key (no ambiguous chars).
     static func generatePSK(length: Int = 12) -> String {
         let alphabet = Array("ABCDEFGHJKMNPQRSTUVWXYZ23456789abcdefghijkmnpqrstuvwxyz")
@@ -195,5 +253,17 @@ final class AppSettings: ObservableObject {
             self.remotePSK = generated
             defaults.set(generated, forKey: Keys.remotePSK)
         }
+
+        self.previewBrightness = defaults.object(forKey: Keys.previewBrightness) as? Double ?? 0
+        self.previewContrast = defaults.object(forKey: Keys.previewContrast) as? Double ?? 1
+        self.previewSaturation = defaults.object(forKey: Keys.previewSaturation) as? Double ?? 1
+        self.previewHueDegrees = defaults.object(forKey: Keys.previewHueDegrees) as? Double ?? 0
+        if let raw = defaults.string(forKey: Keys.previewFilter),
+           let filter = VideoFilter(rawValue: raw) {
+            self.previewFilter = filter
+        } else {
+            self.previewFilter = .none
+        }
+        self.visualEffectsEnabled = defaults.object(forKey: Keys.visualEffectsEnabled) as? Bool ?? true
     }
 }

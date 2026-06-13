@@ -64,7 +64,7 @@ private struct ContentBody: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            CaptureVideoView(engine: vm.engine, recording: recording, devices: devices)
+            CaptureVideoView(engine: vm.engine, recording: recording, devices: devices, settings: settings)
                 .onTapGesture(count: 2) { toggleFullscreen() }
 
             // Recording indicator in fullscreen
@@ -101,7 +101,7 @@ private struct ContentBody: View {
                 // Background pattern — visible in letterbox/pillarbox bars
                 Color(white: 0.06)
 
-                CaptureVideoView(engine: vm.engine, recording: recording, devices: devices)
+                CaptureVideoView(engine: vm.engine, recording: recording, devices: devices, settings: settings)
                     .onTapGesture(count: 2) { toggleFullscreen() }
 
                 // Preview badge
